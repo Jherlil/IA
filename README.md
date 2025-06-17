@@ -22,7 +22,8 @@ Work for Ethereum
 
 ```
 
-You need to add `-t numberThreads` to get better speed
+Keyhunt now detects the number of available CPU cores and uses them all by
+default. You can still add `-t numberThreads` to override this value.
 
 - Run against Puzzle 125 (bsgs mode)
 
@@ -30,7 +31,8 @@ You need to add `-t numberThreads` to get better speed
 ./keyhunt -m bsgs -f tests/125.txt -b 125 -q -s 10 -R
 ```
 
-You need to add `-t numberThreads` and `-k factor` to get better speed
+By default all CPU threads are used. You can combine `-t numberThreads` with
+`-k factor` to increase memory usage and improve speed.
 
 ## Free Code
 

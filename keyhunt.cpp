@@ -471,10 +471,24 @@ int main(int argc, char **argv)	{
 
 	secp = new Secp256K1();
 	secp->Init();
-	OUTPUTSECONDS.SetInt32(30);
-	ZERO.SetInt32(0);
-	ONE.SetInt32(1);
-	BSGS_GROUP_SIZE.SetInt32(CPU_GRP_SIZE);
+        OUTPUTSECONDS.SetInt32(30);
+        ZERO.SetInt32(0);
+        ONE.SetInt32(1);
+        BSGS_GROUP_SIZE.SetInt32(CPU_GRP_SIZE);
+
+#ifdef _OPENMP
+        NTHREADS = omp_get_num_procs();
+        omp_set_num_threads(NTHREADS);
+#else
+#if defined(_WIN64) && !defined(__CYGWIN__)
+        SYSTEM_INFO sysinfo;
+        GetSystemInfo(&sysinfo);
+        NTHREADS = sysinfo.dwNumberOfProcessors;
+#else
+        NTHREADS = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+#endif
+        printf("[+] Default threads : %u\n", NTHREADS);
 	
 #if defined(_WIN64) && !defined(__CYGWIN__)
 	//Any windows secure random source goes here
