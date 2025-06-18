@@ -450,14 +450,17 @@ void generate_gtable(int bits, const char* filename) {
         perror("[-] Cannot create GTable file");
         exit(1);
     }
-    Point P = secp->G;
+
+    Point G(secp->G);
+    Point P(G);
+
     for (uint64_t i = 0; i < (1ULL << exp); ++i) {
-        uint8_t raw[64];
-        P.x.Get32Bytes(raw);
-        P.y.Get32Bytes(raw+32);
-        fwrite(raw, 1, 64, f);
-        P = secp->AddDirect(P, secp->G);
+        uint8_t compressed[33];
+        secp->GetPublicKeyRaw(true, P, (char*)compressed);
+        fwrite(compressed, 1, 33, f);
+        P = secp->Add(P, G);
     }
+
     fclose(f);
     printf("[+] GTable generated and saved to %s\n", filename);
 }
@@ -467,6 +470,7 @@ void load_gtable(const char* filename, int bits) {
     int exp = bits + 20;
     GTableSize = 1ULL << exp;
     GTable = new Point[GTableSize];
+
     FILE* f = fopen(filename, "rb");
     if (!f) {
         printf("[*] GTable file not found. Generating...\n");
@@ -477,18 +481,30 @@ void load_gtable(const char* filename, int bits) {
             exit(1);
         }
     }
-    uint8_t raw[64];
-    Int x,y,z;
-    z.SetInt32(1);
+
+    uint8_t raw[33];
+    Int x, y, s, p;
     for (uint64_t i = 0; i < GTableSize; ++i) {
-        if (fread(raw, 1, 64, f) != 64) {
+        if (fread(raw, 1, 33, f) != 33) {
             perror("[-] Error reading GTable file");
             fclose(f);
             exit(1);
         }
-        x.Set32Bytes(raw);
-        y.Set32Bytes(raw+32);
-        GTable[i].Set(&x,&y,&z);
+        bool even = (raw[0] == 0x02);
+        for (int j = 0; j < 32; j++) {
+            x.SetByte(31 - j, raw[j + 1]);
+        }
+        s.ModSquareK1(&x);
+        p.ModMulK1(&s, &x);
+        p.ModAdd(7);
+        p.ModSqrt();
+        if (!p.IsEven() && even) {
+            p.ModNeg();
+        } else if (p.IsEven() && !even) {
+            p.ModNeg();
+        }
+        y.Set(&p);
+        GTable[i].Set(&x, &y, &ONE);
     }
     fclose(f);
     printf("[+] GTable loaded (%llu entries)\n", (unsigned long long)GTableSize);
@@ -500,21 +516,34 @@ Point ComputePublicKey_GTable(const Int& priv) {
     }
 
     Point result;
+    result.Clear();
+    result.z.SetInt32(1);
+    bool init = false;
+
     Int temp(&const_cast<Int&>(priv));
     uint64_t i = 0;
-
-    while(!temp.IsZero() && i < GTableSize){
-        if(temp.IsOdd())
-            result = secp->AddDirect(result, GTable[i]);
+    while (!temp.IsZero() && i < GTableSize) {
+        if (temp.IsOdd()) {
+            if (!init) {
+                result.Set(GTable[i]);
+                init = true;
+            } else {
+                result = secp->AddDirect(result, GTable[i]);
+            }
+        }
         temp.ShiftR(1);
-        i++;
+        ++i;
     }
 
-    if(!temp.IsZero()){
+    if (!temp.IsZero()) {
         Int high(&temp);
-        high.ShiftL(i);
-        Point R = secp->ComputePublicKey(&high);
-        result = secp->AddDirect(result, R);
+        high.ShiftL((uint32_t)i);
+        Point R = secp->ScalarMultiplication(secp->G, &high);
+        if (!init) {
+            result.Set(R);
+        } else {
+            result = secp->AddDirect(result, R);
+        }
     }
 
     return result;
