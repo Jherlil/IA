@@ -550,7 +550,7 @@ Point ComputePublicKey_GTable(const Int& priv) {
 }
 
 static inline Point compute_public_key(Int *priv){
-    if (GTable != nullptr && GTableSize > 0){
+    if (gtable_bits >= 0){
         return ComputePublicKey_GTable(*priv);
     }
     return secp->ComputePublicKey(priv);
