@@ -433,21 +433,25 @@ Int lambda,lambda2,beta,beta2;
 Secp256K1 *secp;
 
 
-int gtable_bits = -1; // -1 = desativado, 0 = 2^20, ..., 6 = 2^26
+// -g option enables precomputed generator tables (GTables)
+// gtable_bits values: -1 = disabled, 0 = 2^20, 1 = 2^21, ..., 6 = 2^26
+int gtable_bits = -1;
 char gtable_filename[64] = {0};
 
 Point* GTable = nullptr;
 int GTableSize = 0;
 
 void generate_gtable(int bits, const char* filename) {
-    printf("[+] Generating GTable 2^%d...\n", bits);
+    // 'bits' is the index passed via -g (0..6). Actual table size is 2^(bits+20)
+    int exp = bits + 20;
+    printf("[+] Generating GTable 2^%d...\n", exp);
     FILE* f = fopen(filename, "wb");
     if (!f) {
         perror("[-] Cannot create GTable file");
         exit(1);
     }
     Point P = secp->G;
-    for (int64_t i = 0; i < (1LL << bits); ++i) {
+    for (int64_t i = 0; i < (1LL << exp); ++i) {
         uint8_t raw[64];
         P.x.Get32Bytes(raw);
         P.y.Get32Bytes(raw+32);
@@ -459,7 +463,9 @@ void generate_gtable(int bits, const char* filename) {
 }
 
 void load_gtable(const char* filename, int bits) {
-    GTableSize = 1 << bits;
+    // allocate memory for 2^(bits+20) entries
+    int exp = bits + 20;
+    GTableSize = 1 << exp;
     GTable = new Point[GTableSize];
     FILE* f = fopen(filename, "rb");
     if (!f) {
