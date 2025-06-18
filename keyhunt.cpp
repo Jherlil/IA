@@ -481,7 +481,11 @@ void load_gtable(const char* filename, int bits) {
     Int x,y,z;
     z.SetInt32(1);
     for (int i = 0; i < GTableSize; ++i) {
-        fread(raw, 1, 64, f);
+        if (fread(raw, 1, 64, f) != 64) {
+            perror("[-] Error reading GTable file");
+            fclose(f);
+            exit(1);
+        }
         x.Set32Bytes(raw);
         y.Set32Bytes(raw+32);
         GTable[i].Set(&x,&y,&z);
@@ -494,7 +498,8 @@ Point ComputePublicKey_GTable(const Int& priv) {
     Point result;
     result.Clear();
     bool first = true;
-    for (int i = 0; i < GTableSize; ++i) {
+    int limit = GTableSize < 256 ? GTableSize : 256;
+    for (int i = 0; i < limit; ++i) {
         if (const_cast<Int*>(&priv)->GetBit(i)) {
             if (first) {
                 result.Set(GTable[i]);
@@ -507,7 +512,6 @@ Point ComputePublicKey_GTable(const Int& priv) {
     if(first) result.Clear();
     return result;
 }
-#include "hash/ripemd160.h"
 static inline Point compute_public_key(Int *priv){
     if (GTable != nullptr && GTableSize > 0){
         return ComputePublicKey_GTable(*priv);
