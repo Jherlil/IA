@@ -26,8 +26,9 @@ email: albertobsd@gmail.com
 
 #include "hash/sha256.h"
 
+extern Secp256K1 *secp;
+
 #include <fstream>
-#include <secp256k1/SECP256K1.h>
 Point* GTable = nullptr;
 int GTableSize = 0;
 
@@ -38,13 +39,12 @@ void generate_gtable(int bits, const char* filename) {
         perror("[-] Cannot create GTable file");
         exit(1);
     }
-    Point G = Point::G();
-    Point P = G;
+    Point P = secp->G;
+    uint8_t compressed[33];
     for (int64_t i = 0; i < (1LL << bits); ++i) {
-        uint8_t compressed[33];
-        P.getPublicKeyCompressed(compressed);
+        secp->GetPublicKeyRaw(true, P, (char*)compressed);
         fwrite(compressed, 1, 33, f);
-        P = P + G;
+        P = secp->AddDirect(P, secp->G);
     }
     fclose(f);
     printf("[+] GTable generated and saved to %s\n", filename);
@@ -64,21 +64,30 @@ void load_gtable(const char* filename, int bits) {
         }
     }
     uint8_t buffer[33];
+    char hex[67];
+    bool isComp;
     for (int i = 0; i < GTableSize; ++i) {
         fread(buffer, 1, 33, f);
-        GTable[i].fromBytesCompressed(buffer);
+        tohex_dst((char*)buffer,33,hex);
+        hex[66]='\0';
+        secp->ParsePublicKeyHex(hex, GTable[i], isComp);
     }
     fclose(f);
     printf("[+] GTable loaded (%d entries)\n", GTableSize);
 }
 
-Point ComputePublicKey_GTable(const Int& priv) {
+Point ComputePublicKey_GTable(Int& priv) {
     Point result;
     for (int i = 0; i < GTableSize; ++i) {
-        if (priv.testBit(i)) {
-            result = result + GTable[i];
+        if (priv.GetBit(i)) {
+            if(result.isZero())
+                result = GTable[i];
+            else
+                result = secp->AddDirect(result, GTable[i]);
         }
     }
+    if(!result.isZero())
+        result.Reduce();
     return result;
 }
 #include "hash/ripemd160.h"
@@ -845,11 +854,19 @@ int main(int argc, char **argv)	{
 					}
 				}
 				else {
-					fprintf(stderr,"[+] The string \"%s\" is not Valid Base58\n",optarg);
-				}
-				
-			break;
-			case '8':
+                                fprintf(stderr,"[+] The string \"%s\" is not Valid Base58\n",optarg);
+                                }
+
+                        break;
+                        case 'G':
+                                gtable_bits = atoi(optarg);
+                                if(gtable_bits < 0 || gtable_bits > 6){
+                                        fprintf(stderr,"[-] Invalid GTable bits (0-6)\n");
+                                        exit(EXIT_FAILURE);
+                                }
+                                sprintf(gtable_filename,"gtable_%d.bin",gtable_bits + 20);
+                        break;
+                        case '8':
 				if(strlen(optarg) == 58)	{
 					Ccoinbuffer = optarg; 
 					printf("[+] Base58 for Minikeys %s\n",Ccoinbuffer);
@@ -897,6 +914,9 @@ int main(int argc, char **argv)	{
 		stride.Set(&ONE);
 	}
 	init_generator();
+        if(FLAGMODE == MODE_RMD160_BSGS && gtable_bits >= 0){
+                load_gtable(gtable_filename, gtable_bits + 20);
+        }
 	if(FLAGMODE == MODE_BSGS )	{
 		printf("[+] Mode BSGS %s\n",bsgs_modes[FLAGBSGSMODE]);
 	}
@@ -5850,6 +5870,7 @@ void menu() {
 	printf("-I stride   Stride for xpoint, rmd160 and address, this option don't work with bsgs\n");
         printf("-k value    Use this only with bsgs mode, k value is factor for M, more speed but more RAM use wisely\n");
         printf("-j          Enable rmd160-bsgs mode (use -k N for table size)\n");
+        printf("-G bits    Load or create GTable 2^bits for rmd160-bsgs (bits 20-26)\n");
         printf("-l look     What type of address/hash160 are you looking for <compress, uncompress, both> Only for rmd160 and address\n");
 	printf("-m mode     mode of search for cryptos. (bsgs, xpoint, rmd160, address, vanity) default: address\n");
 	printf("-M          Matrix screen, feel like a h4x0r, but performance will dropped\n");
@@ -6791,7 +6812,12 @@ void calcualteindex(int i,Int *key)	{
 void generate_block(Int *start,uint64_t count,struct rmd160_entry *table){
         Int key;
         key.Set(start);
-        Point pub = secp->ComputePublicKey(&key);
+        Point pub;
+        if(GTable != nullptr){
+                pub = ComputePublicKey_GTable(key);
+        }else{
+                pub = secp->ComputePublicKey(&key);
+        }
 
         uint64_t i = 0;
         while(i + 4 <= count){
@@ -6904,13 +6930,4 @@ void *thread_process_rmd160_bsgs(void *vargp) {
         free(table);
         ends[thread_number] = 1;
         return NULL;
-
-		case 'g':
-			gtable_bits = atoi(optarg);
-			if (gtable_bits < 0 || gtable_bits > 6) {
-				printf("[-] Invalid GTable bits (range 0–6 allowed)\n");
-				exit(1);
-			}
-			sprintf(gtable_filename, "gtable_%d.bin", gtable_bits + 20);
-			break;
 }
