@@ -434,15 +434,15 @@ Secp256K1 *secp;
 
 
 // -g option enables precomputed generator tables (GTables)
-// gtable_bits values: -1 = disabled, 0 = 2^20, 1 = 2^21, ..., 6 = 2^26
+// gtable_bits values: -1 = disabled, 0 = 2^20, 1 = 2^21, ..., 12 = 2^32
 int gtable_bits = -1;
 char gtable_filename[64] = {0};
 
 Point* GTable = nullptr;
-int GTableSize = 0;
+uint64_t GTableSize = 0;
 
 void generate_gtable(int bits, const char* filename) {
-    // 'bits' is the index passed via -g (0..6). Actual table size is 2^(bits+20)
+    // 'bits' is the index passed via -g (0..12). Actual table size is 2^(bits+20)
     int exp = bits + 20;
     printf("[+] Generating GTable 2^%d...\n", exp);
     FILE* f = fopen(filename, "wb");
@@ -451,7 +451,7 @@ void generate_gtable(int bits, const char* filename) {
         exit(1);
     }
     Point P = secp->G;
-    for (int64_t i = 0; i < (1LL << exp); ++i) {
+    for (uint64_t i = 0; i < (1ULL << exp); ++i) {
         uint8_t raw[64];
         P.x.Get32Bytes(raw);
         P.y.Get32Bytes(raw+32);
@@ -465,7 +465,7 @@ void generate_gtable(int bits, const char* filename) {
 void load_gtable(const char* filename, int bits) {
     // allocate memory for 2^(bits+20) entries
     int exp = bits + 20;
-    GTableSize = 1 << exp;
+    GTableSize = 1ULL << exp;
     GTable = new Point[GTableSize];
     FILE* f = fopen(filename, "rb");
     if (!f) {
@@ -480,7 +480,7 @@ void load_gtable(const char* filename, int bits) {
     uint8_t raw[64];
     Int x,y,z;
     z.SetInt32(1);
-    for (int i = 0; i < GTableSize; ++i) {
+    for (uint64_t i = 0; i < GTableSize; ++i) {
         if (fread(raw, 1, 64, f) != 64) {
             perror("[-] Error reading GTable file");
             fclose(f);
@@ -491,26 +491,15 @@ void load_gtable(const char* filename, int bits) {
         GTable[i].Set(&x,&y,&z);
     }
     fclose(f);
-    printf("[+] GTable loaded (%d entries)\n", GTableSize);
+    printf("[+] GTable loaded (%llu entries)\n", (unsigned long long)GTableSize);
 }
 
 Point ComputePublicKey_GTable(const Int& priv) {
-    Point result;
-    result.Clear();
-    bool first = true;
-    int limit = GTableSize < 256 ? GTableSize : 256;
-    for (int i = 0; i < limit; ++i) {
-        if (const_cast<Int*>(&priv)->GetBit(i)) {
-            if (first) {
-                result.Set(GTable[i]);
-                first = false;
-            } else {
-                result = secp->AddDirect(result, GTable[i]);
-            }
-        }
+    uint64_t idx = const_cast<Int&>(priv).GetInt64();
+    if (idx == 0 || idx > GTableSize) {
+        return secp->ComputePublicKey(const_cast<Int*>(&priv));
     }
-    if(first) result.Clear();
-    return result;
+    return GTable[idx - 1];
 }
 static inline Point compute_public_key(Int *priv){
     if (GTable != nullptr && GTableSize > 0){
@@ -861,8 +850,8 @@ int main(int argc, char **argv)	{
 			break;
                         case 'g':
                                 gtable_bits = atoi(optarg);
-                                if (gtable_bits < 0 || gtable_bits > 6) {
-                                        printf("[-] Invalid GTable bits (range 0-6 allowed)\n");
+                                if (gtable_bits < 0 || gtable_bits > 12) {
+                                        printf("[-] Invalid GTable bits (range 0-12 allowed)\n");
                                         exit(1);
                                 }
                                 sprintf(gtable_filename, "gtable_%d.bin", gtable_bits + 20);
