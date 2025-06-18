@@ -27,60 +27,6 @@ email: albertobsd@gmail.com
 #include "hash/sha256.h"
 
 #include <fstream>
-#include <secp256k1/SECP256K1.h>
-Point* GTable = nullptr;
-int GTableSize = 0;
-
-void generate_gtable(int bits, const char* filename) {
-    printf("[+] Generating GTable 2^%d...\n", bits);
-    FILE* f = fopen(filename, "wb");
-    if (!f) {
-        perror("[-] Cannot create GTable file");
-        exit(1);
-    }
-    Point G = Point::G();
-    Point P = G;
-    for (int64_t i = 0; i < (1LL << bits); ++i) {
-        uint8_t compressed[33];
-        P.getPublicKeyCompressed(compressed);
-        fwrite(compressed, 1, 33, f);
-        P = P + G;
-    }
-    fclose(f);
-    printf("[+] GTable generated and saved to %s\n", filename);
-}
-
-void load_gtable(const char* filename, int bits) {
-    GTableSize = 1 << bits;
-    GTable = new Point[GTableSize];
-    FILE* f = fopen(filename, "rb");
-    if (!f) {
-        printf("[*] GTable file not found. Generating...\n");
-        generate_gtable(bits, filename);
-        f = fopen(filename, "rb");
-        if (!f) {
-            perror("[-] Cannot open GTable file");
-            exit(1);
-        }
-    }
-    uint8_t buffer[33];
-    for (int i = 0; i < GTableSize; ++i) {
-        fread(buffer, 1, 33, f);
-        GTable[i].fromBytesCompressed(buffer);
-    }
-    fclose(f);
-    printf("[+] GTable loaded (%d entries)\n", GTableSize);
-}
-
-Point ComputePublicKey_GTable(const Int& priv) {
-    Point result;
-    for (int i = 0; i < GTableSize; ++i) {
-        if (priv.testBit(i)) {
-            result = result + GTable[i];
-        }
-    }
-    return result;
-}
 #include "hash/ripemd160.h"
 #ifdef _OPENMP
 #include <omp.h>
@@ -489,6 +435,79 @@ Secp256K1 *secp;
 
 int gtable_bits = -1; // -1 = desativado, 0 = 2^20, ..., 6 = 2^26
 char gtable_filename[64] = {0};
+
+Point* GTable = nullptr;
+int GTableSize = 0;
+
+void generate_gtable(int bits, const char* filename) {
+    printf("[+] Generating GTable 2^%d...\n", bits);
+    FILE* f = fopen(filename, "wb");
+    if (!f) {
+        perror("[-] Cannot create GTable file");
+        exit(1);
+    }
+    Point P = secp->G;
+    for (int64_t i = 0; i < (1LL << bits); ++i) {
+        uint8_t raw[64];
+        P.x.Get32Bytes(raw);
+        P.y.Get32Bytes(raw+32);
+        fwrite(raw, 1, 64, f);
+        P = secp->AddDirect(P, secp->G);
+    }
+    fclose(f);
+    printf("[+] GTable generated and saved to %s\n", filename);
+}
+
+void load_gtable(const char* filename, int bits) {
+    GTableSize = 1 << bits;
+    GTable = new Point[GTableSize];
+    FILE* f = fopen(filename, "rb");
+    if (!f) {
+        printf("[*] GTable file not found. Generating...\n");
+        generate_gtable(bits, filename);
+        f = fopen(filename, "rb");
+        if (!f) {
+            perror("[-] Cannot open GTable file");
+            exit(1);
+        }
+    }
+    uint8_t raw[64];
+    Int x,y,z;
+    z.SetInt32(1);
+    for (int i = 0; i < GTableSize; ++i) {
+        fread(raw, 1, 64, f);
+        x.Set32Bytes(raw);
+        y.Set32Bytes(raw+32);
+        GTable[i].Set(&x,&y,&z);
+    }
+    fclose(f);
+    printf("[+] GTable loaded (%d entries)\n", GTableSize);
+}
+
+Point ComputePublicKey_GTable(const Int& priv) {
+    Point result;
+    result.Clear();
+    bool first = true;
+    for (int i = 0; i < GTableSize; ++i) {
+        if (const_cast<Int*>(&priv)->GetBit(i)) {
+            if (first) {
+                result.Set(GTable[i]);
+                first = false;
+            } else {
+                result = secp->AddDirect(result, GTable[i]);
+            }
+        }
+    }
+    if(first) result.Clear();
+    return result;
+}
+#include "hash/ripemd160.h"
+static inline Point compute_public_key(Int *priv){
+    if (GTable != nullptr && GTableSize > 0){
+        return ComputePublicKey_GTable(*priv);
+    }
+    return secp->ComputePublicKey(priv);
+}
 int main(int argc, char **argv)	{
 	char buffer[2048];
 	char rawvalue[32];
@@ -563,7 +582,7 @@ int main(int argc, char **argv)	{
 	
 	printf("[+] Version %s, developed by AlbertoBSD\n",version);
 
-    while ((c = getopt(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:j")) != -1) {
+    while ((c = getopt(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:g:v:G:8:z:j")) != -1) {
 		switch(c) {
 			case 'h':
 				menu();
@@ -830,6 +849,14 @@ int main(int argc, char **argv)	{
                                 omp_set_num_threads(NTHREADS);
 				printf((NTHREADS > 1) ? "[+] Threads : %u\n": "[+] Thread : %u\n",NTHREADS);
 			break;
+                        case 'g':
+                                gtable_bits = atoi(optarg);
+                                if (gtable_bits < 0 || gtable_bits > 6) {
+                                        printf("[-] Invalid GTable bits (range 0-6 allowed)\n");
+                                        exit(1);
+                                }
+                                sprintf(gtable_filename, "gtable_%d.bin", gtable_bits + 20);
+                        break;
 			case 'v':
 				FLAGVANITY = 1;
 				if(vanity_bloom == NULL){
@@ -897,6 +924,8 @@ int main(int argc, char **argv)	{
 		stride.Set(&ONE);
 	}
 	init_generator();
+        if(gtable_bits >= 0)
+                load_gtable(gtable_filename, gtable_bits);
 	if(FLAGMODE == MODE_BSGS )	{
 		printf("[+] Mode BSGS %s\n",bsgs_modes[FLAGBSGSMODE]);
 	}
@@ -1403,12 +1432,12 @@ int main(int argc, char **argv)	{
 
 
 
-		BSGS_MP = secp->ComputePublicKey(&BSGS_M);
-		BSGS_MP_double = secp->ComputePublicKey(&BSGS_M_double);
-		BSGS_MP2 = secp->ComputePublicKey(&BSGS_M2);
-		BSGS_MP2_double = secp->ComputePublicKey(&BSGS_M2_double);
-		BSGS_MP3 = secp->ComputePublicKey(&BSGS_M3);
-		BSGS_MP3_double = secp->ComputePublicKey(&BSGS_M3_double);
+		BSGS_MP = compute_public_key(&BSGS_M);
+		BSGS_MP_double = compute_public_key(&BSGS_M_double);
+		BSGS_MP2 = compute_public_key(&BSGS_M2);
+		BSGS_MP2_double = compute_public_key(&BSGS_M2_double);
+		BSGS_MP3 = compute_public_key(&BSGS_M3);
+		BSGS_MP3_double = compute_public_key(&BSGS_M3_double);
 		
 		BSGS_AMP2.reserve(32);
 		BSGS_AMP3.reserve(32);
@@ -2557,7 +2586,7 @@ void *thread_process_minikeys(void *vargp)	{
 					
 					for(k = 0; k < 4; k++)	{
 						key_mpz[k].Set32Bytes((uint8_t*)rawvalue[k]);
-						publickey[k] = secp->ComputePublicKey(&key_mpz[k]);
+						publickey[k] = compute_public_key(&key_mpz[k]);
 					}
 					
 					secp->GetHash160(P2PKH,false,publickey[0],publickey[1],publickey[2],publickey[3],(uint8_t*)publickeyhashrmd160_uncompress[0],(uint8_t*)publickeyhashrmd160_uncompress[1],(uint8_t*)publickeyhashrmd160_uncompress[2],(uint8_t*)publickeyhashrmd160_uncompress[3]);
@@ -2686,7 +2715,7 @@ void *thread_process(void *vargp)	{
 				temp_stride.SetInt32(CPU_GRP_SIZE / 2);
 				temp_stride.Mult(&stride);
 				key_mpz.Add(&temp_stride);
-	 			startP = secp->ComputePublicKey(&key_mpz);
+	 			startP = compute_public_key(&key_mpz);
 				key_mpz.Sub(&temp_stride);
 
 				for(i = 0; i < hLength; i++) {
@@ -2899,7 +2928,7 @@ void *thread_process(void *vargp)	{
 														keyfound.SetInt32(k);
 														keyfound.Mult(&stride);
 														keyfound.Add(&key_mpz);
-														publickey = secp->ComputePublicKey(&keyfound);
+														publickey = compute_public_key(&keyfound);
 														switch(l)	{
 															case 0:	//Original point, prefix 02
 																if(publickey.y.IsOdd())	{	//if the current publickey is odd that means, we need to negate the keyfound to get the correct key
@@ -2963,7 +2992,7 @@ void *thread_process(void *vargp)	{
 														keyfound.Mult(&stride);
 														keyfound.Add(&key_mpz);
 														
-														publickey = secp->ComputePublicKey(&keyfound);
+														publickey = compute_public_key(&keyfound);
 														secp->GetHash160(P2PKH,true,publickey,(uint8_t*)publickeyhashrmd160);
 														if(memcmp(publickeyhashrmd160_endomorphism[l][k],publickeyhashrmd160,20) != 0)	{
 															keyfound.Neg();
@@ -2989,7 +3018,7 @@ void *thread_process(void *vargp)	{
 														switch(l)	{
 															case 6:
 															case 7:
-																publickey = secp->ComputePublicKey(&keyfound);
+																publickey = compute_public_key(&keyfound);
 																secp->GetHash160(P2PKH,false,publickey,(uint8_t*)publickeyhashrmd160_uncompress[0]);
 																if(memcmp(publickeyhashrmd160_endomorphism[l][k],publickeyhashrmd160_uncompress[0],20) != 0){
 																	keyfound.Neg();
@@ -2999,7 +3028,7 @@ void *thread_process(void *vargp)	{
 															case 8:
 															case 9:
 																keyfound.ModMulK1order(&lambda);
-																publickey = secp->ComputePublicKey(&keyfound);
+																publickey = compute_public_key(&keyfound);
 																secp->GetHash160(P2PKH,false,publickey,(uint8_t*)publickeyhashrmd160_uncompress[0]);
 																if(memcmp(publickeyhashrmd160_endomorphism[l][k],publickeyhashrmd160_uncompress[0],20) != 0){
 																	keyfound.Neg();
@@ -3009,7 +3038,7 @@ void *thread_process(void *vargp)	{
 															case 10:
 															case 11:
 																keyfound.ModMulK1order(&lambda2);
-																publickey = secp->ComputePublicKey(&keyfound);
+																publickey = compute_public_key(&keyfound);
 																secp->GetHash160(P2PKH,false,publickey,(uint8_t*)publickeyhashrmd160_uncompress[0]);
 																if(memcmp(publickeyhashrmd160_endomorphism[l][k],publickeyhashrmd160_uncompress[0],20) != 0){
 																	keyfound.Neg();
@@ -3051,7 +3080,7 @@ void *thread_process(void *vargp)	{
 													switch(l)	{
 														case 0:
 														case 1:
-															publickey = secp->ComputePublicKey(&keyfound);
+															publickey = compute_public_key(&keyfound);
 															generate_binaddress_eth(publickey,(uint8_t*)publickeyhashrmd160_uncompress[0]);
 															if(memcmp(publickeyhashrmd160_endomorphism[l][k],publickeyhashrmd160_uncompress[0],20) != 0){
 																keyfound.Neg();
@@ -3061,7 +3090,7 @@ void *thread_process(void *vargp)	{
 														case 2:
 														case 3:
 															keyfound.ModMulK1order(&lambda);
-															publickey = secp->ComputePublicKey(&keyfound);
+															publickey = compute_public_key(&keyfound);
 															generate_binaddress_eth(publickey,(uint8_t*)publickeyhashrmd160_uncompress[0]);
 															if(memcmp(publickeyhashrmd160_endomorphism[l][k],publickeyhashrmd160_uncompress[0],20) != 0){
 																keyfound.Neg();
@@ -3071,7 +3100,7 @@ void *thread_process(void *vargp)	{
 														case 4:
 														case 5:
 															keyfound.ModMulK1order(&lambda2);
-															publickey = secp->ComputePublicKey(&keyfound);
+															publickey = compute_public_key(&keyfound);
 															generate_binaddress_eth(publickey,(uint8_t*)publickeyhashrmd160_uncompress[0]);
 															if(memcmp(publickeyhashrmd160_endomorphism[l][k],publickeyhashrmd160_uncompress[0],20) != 0){
 																keyfound.Neg();
@@ -3296,7 +3325,7 @@ void *thread_process_vanity(void *vargp)	{
 				temp_stride.SetInt32(CPU_GRP_SIZE / 2);
 				temp_stride.Mult(&stride);
 				key_mpz.Add(&temp_stride);
-	 			startP = secp->ComputePublicKey(&key_mpz);
+	 			startP = compute_public_key(&key_mpz);
 				key_mpz.Sub(&temp_stride);
 
 				for(i = 0; i < hLength; i++) {
@@ -3470,7 +3499,7 @@ void *thread_process_vanity(void *vargp)	{
 										keyfound.SetInt32(k);
 										keyfound.Mult(&stride);
 										keyfound.Add(&key_mpz);
-										publickey = secp->ComputePublicKey(&keyfound);
+										publickey = compute_public_key(&keyfound);
 										
 										switch(l)	{
 											case 0:	//Original point, prefix 02
@@ -3531,7 +3560,7 @@ void *thread_process_vanity(void *vargp)	{
 										keyfound.Mult(&stride);
 										keyfound.Add(&key_mpz);
 										
-										publickey = secp->ComputePublicKey(&keyfound);
+										publickey = compute_public_key(&keyfound);
 										secp->GetHash160(P2PKH,true,publickey,(uint8_t*)publickeyhashrmd160);
 										if(memcmp(publickeyhashrmd160_endomorphism[l][k],publickeyhashrmd160,20) != 0){
 											keyfound.Neg();
@@ -3559,7 +3588,7 @@ void *thread_process_vanity(void *vargp)	{
 										switch(l)	{
 											case 6:
 											case 7:
-												publickey = secp->ComputePublicKey(&keyfound);
+												publickey = compute_public_key(&keyfound);
 												secp->GetHash160(P2PKH,false,publickey,(uint8_t*)publickeyhashrmd160_uncompress[0]);
 												if(memcmp(publickeyhashrmd160_endomorphism[l][k],publickeyhashrmd160_uncompress[0],20) != 0){
 													keyfound.Neg();
@@ -3569,7 +3598,7 @@ void *thread_process_vanity(void *vargp)	{
 											case 8:
 											case 9:
 												keyfound.ModMulK1order(&lambda);
-												publickey = secp->ComputePublicKey(&keyfound);
+												publickey = compute_public_key(&keyfound);
 												secp->GetHash160(P2PKH,false,publickey,(uint8_t*)publickeyhashrmd160_uncompress[0]);
 												if(memcmp(publickeyhashrmd160_endomorphism[l][k],publickeyhashrmd160_uncompress[0],20) != 0){
 													keyfound.Neg();
@@ -3579,7 +3608,7 @@ void *thread_process_vanity(void *vargp)	{
 											case 10:
 											case 11:
 												keyfound.ModMulK1order(&lambda2);
-												publickey = secp->ComputePublicKey(&keyfound);
+												publickey = compute_public_key(&keyfound);
 												secp->GetHash160(P2PKH,false,publickey,(uint8_t*)publickeyhashrmd160_uncompress[0]);
 												if(memcmp(publickeyhashrmd160_endomorphism[l][k],publickeyhashrmd160_uncompress[0],20) != 0){
 													keyfound.Neg();
@@ -3957,12 +3986,12 @@ void *thread_process_bsgs(void *vargp)	{
 				THREADOUTPUT = 1;
 			}
 		}
-		base_point = secp->ComputePublicKey(&base_key);
+		base_point = compute_public_key(&base_key);
 		km.Set(&base_key);
 		km.Neg();
 		km.Add(&secp->order);
 		km.Sub(&intaux);
-		point_aux = secp->ComputePublicKey(&km);
+		point_aux = compute_public_key(&km);
 		for(k = 0; k < bsgs_point_number ; k++)	{
 			if(bsgs_found[k] == 0)	{
 				startP  = secp->AddDirect(OriginalPointsBSGS[k],point_aux);
@@ -4048,7 +4077,7 @@ pn.y.ModAdd(&GSn[i].y);
 							if(r)	{
 								hextemp = keyfound.GetBase16();
 								printf("[+] Thread Key found privkey %s   \n",hextemp);
-								point_found = secp->ComputePublicKey(&keyfound);
+								point_found = compute_public_key(&keyfound);
 								aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed[k],point_found);
 								printf("[+] Publickey %s\n",aux_c);
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -4187,7 +4216,7 @@ void *thread_process_bsgs_random(void *vargp)	{
 				THREADOUTPUT = 1;
 			}
 		}
-		base_point = secp->ComputePublicKey(&base_key);
+		base_point = compute_public_key(&base_key);
 
 		km.Set(&base_key);
 		km.Neg();
@@ -4195,7 +4224,7 @@ void *thread_process_bsgs_random(void *vargp)	{
 		
 		km.Add(&secp->order);
 		km.Sub(&intaux);
-		point_aux = secp->ComputePublicKey(&km);
+		point_aux = compute_public_key(&km);
 
 
 		/* We need to test individually every point in BSGS_Q */
@@ -4297,7 +4326,7 @@ pn.y.ModAdd(&GSn[i].y);
 							if(r)	{
 								hextemp = keyfound.GetBase16();
 								printf("[+] Thread Key found privkey %s    \n",hextemp);
-								point_found = secp->ComputePublicKey(&keyfound);
+								point_found = compute_public_key(&keyfound);
 								aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed[k],point_found);
 								printf("[+] Publickey %s\n",aux_c);
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -4379,7 +4408,7 @@ int bsgs_secondcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privateke
 	base_key.Mult((uint64_t) a);
 	base_key.Add(start_range);
 
-	base_point = secp->ComputePublicKey(&base_key);
+	base_point = compute_public_key(&base_key);
 	point_aux = secp->Negation(base_point);
 
 	/*
@@ -4414,7 +4443,7 @@ int bsgs_thirdcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privatekey
 	base_key.Mult(&BSGS_M2_double);
 	base_key.Add(start_range);
 
-	base_point = secp->ComputePublicKey(&base_key);
+	base_point = compute_public_key(&base_key);
 	point_aux = secp->Negation(base_point);
 	
 	BSGS_S = secp->AddDirect(OriginalPointsBSGS[k_index],point_aux);
@@ -4432,7 +4461,7 @@ int bsgs_thirdcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privatekey
 				privatekey->Set(&calculatedkey);
 				privatekey->Add((uint64_t)(j+1));
 				privatekey->Add(&base_key);
-				point_aux = secp->ComputePublicKey(privatekey);
+				point_aux = compute_public_key(privatekey);
 				if(point_aux.x.IsEqual(&OriginalPointsBSGS[k_index].x))	{
 					found = 1;
 				}
@@ -4441,7 +4470,7 @@ int bsgs_thirdcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privatekey
 					privatekey->Set(&calculatedkey);
 					privatekey->Sub((uint64_t)(j+1));
 					privatekey->Add(&base_key);
-					point_aux = secp->ComputePublicKey(privatekey);
+					point_aux = compute_public_key(privatekey);
 					if(point_aux.x.IsEqual(&OriginalPointsBSGS[k_index].x))	{
 						found = 1;
 					}
@@ -4483,7 +4512,7 @@ void sleep_ms(int milliseconds)	{ // cross-platform sleep function
 
 
 void init_generator()	{
-	Point G = secp->ComputePublicKey(&stride);
+	Point G = compute_public_key(&stride);
 	Point g;
 	g.Set(G);
 	Gn.reserve(CPU_GRP_SIZE / 2);
@@ -4531,7 +4560,7 @@ void *thread_bPload(void *vargp)	{
 	to = tt->to;
 	
 	km.Add((uint64_t)(CPU_GRP_SIZE / 2));
-	startP = secp->ComputePublicKey(&km);
+	startP = compute_public_key(&km);
 	grp->Set(dx);
 	for(uint64_t s=0;s<nbStep;s++) {
 		for(i = 0; i < hLength; i++) {
@@ -4720,7 +4749,7 @@ void *thread_bPload_2blooms(void *vargp)	{
 	//to = tt->to;
 	
 	km.Add((uint64_t)(CPU_GRP_SIZE / 2));
-	startP = secp->ComputePublicKey(&km);
+	startP = compute_public_key(&km);
 	grp->Set(dx);
 	for(uint64_t s=0;s<nbStep;s++) {
 		for(i = 0; i < hLength; i++) {
@@ -4994,14 +5023,14 @@ void *thread_process_bsgs_dance(void *vargp)	{
 			}
 		}
 		
-		base_point = secp->ComputePublicKey(&base_key);
+		base_point = compute_public_key(&base_key);
 
 		km.Set(&base_key);
 		km.Neg();
 		
 		km.Add(&secp->order);
 		km.Sub(&intaux);
-		point_aux = secp->ComputePublicKey(&km);
+		point_aux = compute_public_key(&km);
 		
 		for(k = 0; k < bsgs_point_number ; k++)	{
 			if(bsgs_found[k] == 0)	{
@@ -5102,7 +5131,7 @@ pn.y.ModAdd(&GSn[i].y);
 							if(r)	{
 								hextemp = keyfound.GetBase16();
 								printf("[+] Thread Key found privkey %s   \n",hextemp);
-								point_found = secp->ComputePublicKey(&keyfound);
+								point_found = compute_public_key(&keyfound);
 								aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed[k],point_found);
 								printf("[+] Publickey %s\n",aux_c);
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -5254,14 +5283,14 @@ void *thread_process_bsgs_backward(void *vargp)	{
 			}
 		}
 		
-		base_point = secp->ComputePublicKey(&base_key);
+		base_point = compute_public_key(&base_key);
 
 		km.Set(&base_key);
 		km.Neg();
 		
 		km.Add(&secp->order);
 		km.Sub(&intaux);
-		point_aux = secp->ComputePublicKey(&km);
+		point_aux = compute_public_key(&km);
 		
 		for(k = 0; k < bsgs_point_number ; k++)	{
 			if(bsgs_found[k] == 0)	{
@@ -5360,7 +5389,7 @@ pn.y.ModAdd(&GSn[i].y);
 							if(r)	{
 								hextemp = keyfound.GetBase16();
 								printf("[+] Thread Key found privkey %s   \n",hextemp);
-								point_found = secp->ComputePublicKey(&keyfound);
+								point_found = compute_public_key(&keyfound);
 								aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed[k],point_found);
 								printf("[+] Publickey %s\n",aux_c);
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -5538,14 +5567,14 @@ void *thread_process_bsgs_both(void *vargp)	{
 			}
 		}
 		
-		base_point = secp->ComputePublicKey(&base_key);
+		base_point = compute_public_key(&base_key);
 
 		km.Set(&base_key);
 		km.Neg();
 		
 		km.Add(&secp->order);
 		km.Sub(&intaux);
-		point_aux = secp->ComputePublicKey(&km);
+		point_aux = compute_public_key(&km);
 		
 		for(k = 0; k < bsgs_point_number ; k++)	{
 			if(bsgs_found[k] == 0)	{
@@ -5644,7 +5673,7 @@ void *thread_process_bsgs_both(void *vargp)	{
 								if(r)	{
 									hextemp = keyfound.GetBase16();
 									printf("[+] Thread Key found privkey %s   \n",hextemp);
-									point_found = secp->ComputePublicKey(&keyfound);
+									point_found = compute_public_key(&keyfound);
 									aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed[k],point_found);
 									printf("[+] Publickey %s\n",aux_c);
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -5905,7 +5934,7 @@ void writevanitykey(bool compressed,Int *key)	{
 	FILE *keys;
 	char *hextemp,*hexrmd,public_key_hex[131],address[50],rmdhash[20];
 	hextemp = key->GetBase16();
-	publickey = secp->ComputePublicKey(key);
+	publickey = compute_public_key(key);
 	secp->GetPublicKeyHex(compressed,publickey,public_key_hex);
 	
 	secp->GetHash160(P2PKH,compressed,publickey,(uint8_t*)rmdhash);
@@ -6093,7 +6122,7 @@ void writekey(bool compressed,Int *key)	{
 	memset(address,0,50);
 	memset(public_key_hex,0,132);
 	hextemp = key->GetBase16();
-	publickey = secp->ComputePublicKey(key);
+	publickey = compute_public_key(key);
 	secp->GetPublicKeyHex(compressed,publickey,public_key_hex);
 	secp->GetHash160(P2PKH,compressed,publickey,(uint8_t*)rmdhash);
 	hexrmd = tohex(rmdhash,20);
@@ -6125,7 +6154,7 @@ void writekeyeth(Int *key)	{
 	FILE *keys;
 	char *hextemp,address[43],hash[20];
 	hextemp = key->GetBase16();
-	publickey = secp->ComputePublicKey(key);
+	publickey = compute_public_key(key);
 	generate_binaddress_eth(publickey,(unsigned char*)hash);
 	address[0] = '0';
 	address[1] = 'x';
@@ -6791,7 +6820,7 @@ void calcualteindex(int i,Int *key)	{
 void generate_block(Int *start,uint64_t count,struct rmd160_entry *table){
         Int key;
         key.Set(start);
-        Point pub = secp->ComputePublicKey(&key);
+        Point pub = compute_public_key(&key);
 
         uint64_t i = 0;
         while(i + 4 <= count){
@@ -6904,13 +6933,4 @@ void *thread_process_rmd160_bsgs(void *vargp) {
         free(table);
         ends[thread_number] = 1;
         return NULL;
-
-		case 'g':
-			gtable_bits = atoi(optarg);
-			if (gtable_bits < 0 || gtable_bits > 6) {
-				printf("[-] Invalid GTable bits (range 0–6 allowed)\n");
-				exit(1);
-			}
-			sprintf(gtable_filename, "gtable_%d.bin", gtable_bits + 20);
-			break;
 }
