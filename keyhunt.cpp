@@ -499,33 +499,25 @@ Point ComputePublicKey_GTable(const Int& priv) {
         return secp->ComputePublicKey(const_cast<Int*>(&priv));
     }
 
-    int exp = gtable_bits + 20;
+    Point result;
+    Int temp(&const_cast<Int&>(priv));
+    uint64_t i = 0;
 
-    Int mask((uint64_t)1);
-    mask.ShiftL(exp);            // mask = 2^(exp)
-
-    Int low(&const_cast<Int&>(priv));
-    low.Mod(&mask);              // low  = priv mod 2^(exp)
-
-    Int high(&const_cast<Int&>(priv));
-    high.ShiftR(exp);            // high = priv >> exp
-
-    Int highshifted(&high);
-    highshifted.ShiftL(exp);     // highshifted = high << exp (high * 2^exp)
-    Point R = secp->ComputePublicKey(&highshifted);
-
-    uint64_t idx = low.GetInt64();       // low fits in 64 bits (exp <= 32)
-
-    if (idx > 0) {
-        if (idx < GTableSize) {
-            R = secp->AddDirect(R, GTable[idx - 1]);
-        } else {
-            Point tmp = secp->ComputePublicKey(&low);
-            R = secp->AddDirect(R, tmp);
-        }
+    while(!temp.IsZero() && i < GTableSize){
+        if(temp.IsOdd())
+            result = secp->AddDirect(result, GTable[i]);
+        temp.ShiftR(1);
+        i++;
     }
 
-    return R;
+    if(!temp.IsZero()){
+        Int high(&temp);
+        high.ShiftL(i);
+        Point R = secp->ComputePublicKey(&high);
+        result = secp->AddDirect(result, R);
+    }
+
+    return result;
 }
 
 static inline Point compute_public_key(Int *priv){
