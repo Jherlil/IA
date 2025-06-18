@@ -495,12 +495,41 @@ void load_gtable(const char* filename, int bits) {
 }
 
 Point ComputePublicKey_GTable(const Int& priv) {
-    uint64_t idx = const_cast<Int&>(priv).GetInt64();
-    if (idx == 0 || idx > GTableSize) {
+    if (GTableSize == 0 || gtable_bits < 0) {
         return secp->ComputePublicKey(const_cast<Int*>(&priv));
     }
-    return GTable[idx - 1];
+
+    int exp = gtable_bits + 20;
+
+    Int mask((uint64_t)1);
+    mask.ShiftL(exp);            // mask = 2^(exp)
+
+    Int low(&const_cast<Int&>(priv));
+    low.Mod(&mask);              // low  = priv mod 2^(exp)
+
+    Int high(&const_cast<Int&>(priv));
+    high.ShiftR(exp);            // high = priv >> exp
+
+    Point R = secp->ComputePublicKey(&high);
+
+    for (int i = 0; i < exp; ++i) {
+        R = secp->DoubleDirect(R);        // R = R * 2^exp
+    }
+
+    uint64_t idx = low.GetInt64();       // low fits in 64 bits (exp <= 32)
+
+    if (idx > 0) {
+        if (idx <= GTableSize) {
+            R = secp->AddDirect(R, GTable[idx - 1]);
+        } else {
+            Point tmp = secp->ComputePublicKey(&low);
+            R = secp->AddDirect(R, tmp);
+        }
+    }
+
+    return R;
 }
+
 static inline Point compute_public_key(Int *priv){
     if (GTable != nullptr && GTableSize > 0){
         return ComputePublicKey_GTable(*priv);
