@@ -510,16 +510,14 @@ Point ComputePublicKey_GTable(const Int& priv) {
     Int high(&const_cast<Int&>(priv));
     high.ShiftR(exp);            // high = priv >> exp
 
-    Point R = secp->ComputePublicKey(&high);
-
-    for (int i = 0; i < exp; ++i) {
-        R = secp->DoubleDirect(R);        // R = R * 2^exp
-    }
+    Int highshifted(&high);
+    highshifted.ShiftL(exp);     // highshifted = high << exp (high * 2^exp)
+    Point R = secp->ComputePublicKey(&highshifted);
 
     uint64_t idx = low.GetInt64();       // low fits in 64 bits (exp <= 32)
 
     if (idx > 0) {
-        if (idx <= GTableSize) {
+        if (idx < GTableSize) {
             R = secp->AddDirect(R, GTable[idx - 1]);
         } else {
             Point tmp = secp->ComputePublicKey(&low);
