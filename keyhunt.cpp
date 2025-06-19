@@ -44,7 +44,10 @@ void generate_gtable(int bits, const char* filename) {
     for (int64_t i = 0; i < (1LL << bits); ++i) {
         secp->GetPublicKeyRaw(true, P, (char*)compressed);
         fwrite(compressed, 1, 33, f);
-        P = secp->AddDirect(P, secp->G);
+        if(i == 0)
+            P = secp->DoubleDirect(P);
+        else
+            P = secp->AddDirect(P, secp->G);
     }
     fclose(f);
     printf("[+] GTable generated and saved to %s\n", filename);
@@ -67,10 +70,16 @@ void load_gtable(const char* filename, int bits) {
     char hex[67];
     bool isComp;
     for (int i = 0; i < GTableSize; ++i) {
-        fread(buffer, 1, 33, f);
+        if(fread(buffer, 1, 33, f) != 33){
+            fprintf(stderr, "[-] Error reading gtable file\n");
+            exit(EXIT_FAILURE);
+        }
         tohex_dst((char*)buffer,33,hex);
         hex[66]='\0';
-        secp->ParsePublicKeyHex(hex, GTable[i], isComp);
+        if(!secp->ParsePublicKeyHex(hex, GTable[i], isComp)){
+            fprintf(stderr, "[-] Invalid entry %d in gtable file\n", i);
+            exit(EXIT_FAILURE);
+        }
     }
     fclose(f);
     printf("[+] GTable loaded (%d entries)\n", GTableSize);
