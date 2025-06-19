@@ -23,13 +23,35 @@ email: albertobsd@gmail.com
 #include "secp256k1/Int.h"
 #include "secp256k1/IntGroup.h"
 #include "secp256k1/Random.h"
+extern Secp256K1 *secp;
 
 #include "hash/sha256.h"
 
 #include <fstream>
-#include <secp256k1/SECP256K1.h>
+
 Point* GTable = nullptr;
 int GTableSize = 0;
+
+static Point DecompressPoint(const uint8_t buf[33]) {
+    Point P;
+    Int x;
+    for (int i = 0; i < 32; ++i) {
+        x.SetByte(31 - i, buf[i + 1]);
+    }
+    Int t, y;
+    t.ModSquareK1(&x);
+    y.ModMulK1(&t, &x);
+    y.ModAdd(7);
+    y.ModSqrt();
+    bool even = buf[0] == 0x02;
+    if ((!y.IsEven() && even) || (y.IsEven() && !even)) {
+        y.ModNeg();
+    }
+    P.x.Set(&x);
+    P.y.Set(&y);
+    P.z.SetInt32(1);
+    return P;
+}
 
 void generate_gtable(int bits, const char* filename) {
     printf("[+] Generating GTable 2^%d...\n", bits);
@@ -38,13 +60,13 @@ void generate_gtable(int bits, const char* filename) {
         perror("[-] Cannot create GTable file");
         exit(1);
     }
-    Point G = Point::G();
+    Point G = secp->G;
     Point P = G;
     for (int64_t i = 0; i < (1LL << bits); ++i) {
-        uint8_t compressed[33];
-        P.getPublicKeyCompressed(compressed);
+        unsigned char compressed[33];
+        secp->GetPublicKeyRaw(true, P, (char*)compressed);
         fwrite(compressed, 1, 33, f);
-        P = P + G;
+        P = secp->AddDirect(P, G);
     }
     fclose(f);
     printf("[+] GTable generated and saved to %s\n", filename);
@@ -66,7 +88,7 @@ void load_gtable(const char* filename, int bits) {
     uint8_t buffer[33];
     for (int i = 0; i < GTableSize; ++i) {
         fread(buffer, 1, 33, f);
-        GTable[i].fromBytesCompressed(buffer);
+        GTable[i] = DecompressPoint(buffer);
     }
     fclose(f);
     printf("[+] GTable loaded (%d entries)\n", GTableSize);
@@ -74,9 +96,14 @@ void load_gtable(const char* filename, int bits) {
 
 Point ComputePublicKey_GTable(const Int& priv) {
     Point result;
+    result.Clear();
+    Int tmp((Int*)&priv);
     for (int i = 0; i < GTableSize; ++i) {
-        if (priv.testBit(i)) {
-            result = result + GTable[i];
+        if (tmp.GetBit(i)) {
+            if (result.isZero())
+                result = GTable[i];
+            else
+                result = secp->AddDirect(result, GTable[i]);
         }
     }
     return result;
@@ -859,6 +886,15 @@ int main(int argc, char **argv)	{
 					exit(EXIT_FAILURE);
 				}
 			break;
+                        case 'g':
+                                gtable_bits = atoi(optarg);
+                                if (gtable_bits < 0 || gtable_bits > 60) {
+                                        printf("[-] Invalid GTable bits (range 0-60 allowed)\n");
+                                        exit(1);
+                                }
+                                sprintf(gtable_filename, "gtable_%d.bin", gtable_bits + 20);
+                                load_gtable(gtable_filename, gtable_bits + 20);
+                        break;
 			case 'z':
 				FLAGBLOOMMULTIPLIER= strtol(optarg,NULL,10);
 				if(FLAGBLOOMMULTIPLIER <= 0)	{
@@ -6904,13 +6940,4 @@ void *thread_process_rmd160_bsgs(void *vargp) {
         free(table);
         ends[thread_number] = 1;
         return NULL;
-
-		case 'g':
-			gtable_bits = atoi(optarg);
-			if (gtable_bits < 0 || gtable_bits > 6) {
-				printf("[-] Invalid GTable bits (range 0–6 allowed)\n");
-				exit(1);
-			}
-			sprintf(gtable_filename, "gtable_%d.bin", gtable_bits + 20);
-			break;
 }
