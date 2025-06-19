@@ -272,6 +272,7 @@ All the vanity address and his privatekeys will be saved in the file `VANITYKEYF
 rmd stands for RIPE Message Digest (see https://en.wikipedia.org/wiki/RIPEMD )
 
 mode rmd160 work in the same way than address, but the diference is that file need to have hash rmd160 instead of addresses.
+When using the optimized `rmd160-bsgs` mode the same bloom filter loaded here is checked before each hash comparison to speed up the search.
 
 
 example file `tests/1to32.rmd` :
