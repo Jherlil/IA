@@ -344,6 +344,28 @@ Output:
 ^C] Total 70844416 keys in 15 seconds: ~4 Mkeys/s (4722961 keys/s)
 ```
 
+### rmd160-bsgs
+
+The `-j` option enables a BSGS search over RIPEMD160 hashes. Use `-k` to
+choose the table size in bits and `-G` to generate or load a persistent
+gtable so the table is reused across cycles. The argument for `-G` is a
+value from `0` to `6`, corresponding to tables of `2^(20+bits)` entries.
+
+Approximate memory requirements are:
+
+| bits | RAM |
+|-----:|----:|
+|20|52&nbsp;MB|
+|21|104&nbsp;MB|
+|22|208&nbsp;MB|
+|23|416&nbsp;MB|
+|24|832&nbsp;MB|
+|25|1.6&nbsp;GB|
+|26|3.3&nbsp;GB|
+
+Larger tables grow exponentially. For example a 60‑bit table would need
+over 50 exabytes of memory, which is infeasible.
+
 ## xpoint mode
 
 This method can target the X value of the publickey in the same way that the tool search for address or rmd160 hash, this tool can search for the X values
