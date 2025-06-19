@@ -205,6 +205,7 @@ void Secp256K1::GetPublicKeyHex(bool compressed, Point &pubKey,char *dst){
   }
 }
 
+
 char* Secp256K1::GetPublicKeyRaw(bool compressed, Point &pubKey) {
   char *ret = (char*) malloc(65);
   if(ret == NULL) {
@@ -579,6 +580,59 @@ Point Secp256K1::ScalarMultiplication(Point &P,Int *scalar)	{
 (buff)[13] = 0; \
 (buff)[14] = 0; \
 (buff)[15] = 0xB0;
+
+#ifdef __AVX2__
+void Secp256K1::GetHash160_8(int type,bool compressed,
+  Point &k0,Point &k1,Point &k2,Point &k3,
+  Point &k4,Point &k5,Point &k6,Point &k7,
+  uint8_t *h0,uint8_t *h1,uint8_t *h2,uint8_t *h3,
+  uint8_t *h4,uint8_t *h5,uint8_t *h6,uint8_t *h7) {
+
+  unsigned char sh0[64] __attribute__((aligned(32)));
+  unsigned char sh1[64] __attribute__((aligned(32)));
+  unsigned char sh2[64] __attribute__((aligned(32)));
+  unsigned char sh3[64] __attribute__((aligned(32)));
+  unsigned char sh4[64] __attribute__((aligned(32)));
+  unsigned char sh5[64] __attribute__((aligned(32)));
+  unsigned char sh6[64] __attribute__((aligned(32)));
+  unsigned char sh7[64] __attribute__((aligned(32)));
+
+  if(type == P2PKH || type == BECH32) {
+    if(!compressed) {
+      GetHash160(type, compressed, k0, k1, k2, k3, h0, h1, h2, h3);
+      GetHash160(type, compressed, k4, k5, k6, k7, h4, h5, h6, h7);
+      return;
+    }
+
+    uint32_t b0[16] __attribute__((aligned(32)));
+    uint32_t b1[16] __attribute__((aligned(32)));
+    uint32_t b2[16] __attribute__((aligned(32)));
+    uint32_t b3[16] __attribute__((aligned(32)));
+    uint32_t b4[16] __attribute__((aligned(32)));
+    uint32_t b5[16] __attribute__((aligned(32)));
+    uint32_t b6[16] __attribute__((aligned(32)));
+    uint32_t b7[16] __attribute__((aligned(32)));
+
+    KEYBUFFCOMP(b0, k0);
+    KEYBUFFCOMP(b1, k1);
+    KEYBUFFCOMP(b2, k2);
+    KEYBUFFCOMP(b3, k3);
+    KEYBUFFCOMP(b4, k4);
+    KEYBUFFCOMP(b5, k5);
+    KEYBUFFCOMP(b6, k6);
+    KEYBUFFCOMP(b7, k7);
+
+    sha256_avx2_8(b0,b1,b2,b3,b4,b5,b6,b7,
+                  sh0,sh1,sh2,sh3,sh4,sh5,sh6,sh7);
+    ripemd160_avx2_8(sh0,sh1,sh2,sh3,sh4,sh5,sh6,sh7,
+                     h0,h1,h2,h3,h4,h5,h6,h7);
+    return;
+  }
+
+  GetHash160(type, compressed, k0, k1, k2, k3, h0, h1, h2, h3);
+  GetHash160(type, compressed, k4, k5, k6, k7, h4, h5, h6, h7);
+}
+#endif
 
 
 void Secp256K1::GetHash160(int type,bool compressed,

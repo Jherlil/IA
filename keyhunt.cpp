@@ -6883,6 +6883,18 @@ void generate_block(Int *start,uint64_t count,struct rmd160_entry *table){
                 Point p6 = secp->AddDirect(p5,secp->G);
                 Point p7 = secp->AddDirect(p6,secp->G);
 
+#ifdef __AVX2__
+                secp->GetHash160_8(P2PKH,true,
+                        p0,p1,p2,p3,p4,p5,p6,p7,
+                        table[i].hash,
+                        table[i+1].hash,
+                        table[i+2].hash,
+                        table[i+3].hash,
+                        table[i+4].hash,
+                        table[i+5].hash,
+                        table[i+6].hash,
+                        table[i+7].hash);
+#else
                 secp->GetHash160(P2PKH,true,
                         p0,p1,p2,p3,
                         table[i].hash,
@@ -6895,6 +6907,7 @@ void generate_block(Int *start,uint64_t count,struct rmd160_entry *table){
                         table[i+5].hash,
                         table[i+6].hash,
                         table[i+7].hash);
+#endif
 
                 key.Get32Bytes(table[i].priv); key.AddOne();
                 key.Get32Bytes(table[i+1].priv); key.AddOne();
