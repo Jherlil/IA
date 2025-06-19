@@ -178,6 +178,8 @@ struct address_value	{
 
 struct rmd160_entry {
         uint8_t hash[20];
+        uint8_t hash_l1[20];
+        uint8_t hash_l2[20];
         uint8_t priv[32];
 };
 struct tothread {
@@ -6909,6 +6911,62 @@ void generate_block(Int *start,uint64_t count,struct rmd160_entry *table){
                         table[i+7].hash);
 #endif
 
+                if(FLAGENDOMORPHISM){
+                        Point b0=p0,b1=p1,b2=p2,b3=p3,b4=p4,b5=p5,b6=p6,b7=p7;
+                        Point c0=p0,c1=p1,c2=p2,c3=p3,c4=p4,c5=p5,c6=p6,c7=p7;
+                        b0.x.ModMulK1(&beta);  b1.x.ModMulK1(&beta);  b2.x.ModMulK1(&beta);  b3.x.ModMulK1(&beta);
+                        b4.x.ModMulK1(&beta);  b5.x.ModMulK1(&beta);  b6.x.ModMulK1(&beta);  b7.x.ModMulK1(&beta);
+                        c0.x.ModMulK1(&beta2); c1.x.ModMulK1(&beta2); c2.x.ModMulK1(&beta2); c3.x.ModMulK1(&beta2);
+                        c4.x.ModMulK1(&beta2); c5.x.ModMulK1(&beta2); c6.x.ModMulK1(&beta2); c7.x.ModMulK1(&beta2);
+#ifdef __AVX2__
+                        secp->GetHash160_8(P2PKH,true,
+                                b0,b1,b2,b3,b4,b5,b6,b7,
+                                table[i].hash_l1,
+                                table[i+1].hash_l1,
+                                table[i+2].hash_l1,
+                                table[i+3].hash_l1,
+                                table[i+4].hash_l1,
+                                table[i+5].hash_l1,
+                                table[i+6].hash_l1,
+                                table[i+7].hash_l1);
+                        secp->GetHash160_8(P2PKH,true,
+                                c0,c1,c2,c3,c4,c5,c6,c7,
+                                table[i].hash_l2,
+                                table[i+1].hash_l2,
+                                table[i+2].hash_l2,
+                                table[i+3].hash_l2,
+                                table[i+4].hash_l2,
+                                table[i+5].hash_l2,
+                                table[i+6].hash_l2,
+                                table[i+7].hash_l2);
+#else
+                        secp->GetHash160(P2PKH,true,
+                                b0,b1,b2,b3,
+                                table[i].hash_l1,
+                                table[i+1].hash_l1,
+                                table[i+2].hash_l1,
+                                table[i+3].hash_l1);
+                        secp->GetHash160(P2PKH,true,
+                                b4,b5,b6,b7,
+                                table[i+4].hash_l1,
+                                table[i+5].hash_l1,
+                                table[i+6].hash_l1,
+                                table[i+7].hash_l1);
+                        secp->GetHash160(P2PKH,true,
+                                c0,c1,c2,c3,
+                                table[i].hash_l2,
+                                table[i+1].hash_l2,
+                                table[i+2].hash_l2,
+                                table[i+3].hash_l2);
+                        secp->GetHash160(P2PKH,true,
+                                c4,c5,c6,c7,
+                                table[i+4].hash_l2,
+                                table[i+5].hash_l2,
+                                table[i+6].hash_l2,
+                                table[i+7].hash_l2);
+#endif
+                }
+
                 key.Get32Bytes(table[i].priv); key.AddOne();
                 key.Get32Bytes(table[i+1].priv); key.AddOne();
                 key.Get32Bytes(table[i+2].priv); key.AddOne();
@@ -6924,6 +6982,14 @@ void generate_block(Int *start,uint64_t count,struct rmd160_entry *table){
 
         for(; i < count; i++){
                 secp->GetHash160(P2PKH,true,pub,table[i].hash);
+                if(FLAGENDOMORPHISM){
+                        Point b = pub;
+                        b.x.ModMulK1(&beta);
+                        secp->GetHash160(P2PKH,true,b,table[i].hash_l1);
+                        b.x.Set(&pub.x);
+                        b.x.ModMulK1(&beta2);
+                        secp->GetHash160(P2PKH,true,b,table[i].hash_l2);
+                }
                 key.Get32Bytes(table[i].priv);
                 key.AddOne();
                 pub = secp->AddDirect(pub,secp->G);
@@ -6932,94 +6998,65 @@ void generate_block(Int *start,uint64_t count,struct rmd160_entry *table){
 
 void compare_block(struct rmd160_entry *table,uint64_t count){
         char address[40];
-        uint8_t htmp[20];
         if(NTHREADS == 1){
 #pragma omp parallel for schedule(static)
                 for(uint64_t i = 0; i < count; i++){
-                        if(bloom_check(&bloom,table[i].hash,20)){
-                                if(rmd160_ht_lookup(table[i].hash)){
-                                        Int key;
-                                        key.Set32Bytes(table[i].priv);
-                                        rmd160toaddress_dst((char*)table[i].hash,address);
+                        if(bloom_check(&bloom,table[i].hash,20) && rmd160_ht_lookup(table[i].hash)){
+                                Int key; key.Set32Bytes(table[i].priv);
+                                rmd160toaddress_dst((char*)table[i].hash,address);
+#pragma omp critical
+                                {
+                                        char *keyhex = key.GetBase16();
+                                        printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
+                                        free(keyhex);
+                                }
+                        }
+                        if(FLAGENDOMORPHISM){
+                                if(bloom_check(&bloom,table[i].hash_l1,20) && rmd160_ht_lookup(table[i].hash_l1)){
+                                        Int k; k.Set32Bytes(table[i].priv); k.ModMulK1order(&lambda);
+                                        rmd160toaddress_dst((char*)table[i].hash_l1,address);
 #pragma omp critical
                                         {
-                                                char *keyhex = key.GetBase16();
+                                                char *keyhex = k.GetBase16();
                                                 printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
                                                 free(keyhex);
                                         }
                                 }
-                                if(FLAGENDOMORPHISM){
-                                        Int k;
-                                        k.Set32Bytes(table[i].priv);
-                                        k.ModMulK1order(&lambda);
-                                        Point p = secp->ComputePublicKey(&k);
-                                        secp->GetHash160(P2PKH,true,p,htmp);
-                                        if(bloom_check(&bloom,htmp,20) && rmd160_ht_lookup(htmp)){
-                                                Int kk; kk.Set32Bytes(table[i].priv);
-                                                kk.ModMulK1order(&lambda);
-                                                rmd160toaddress_dst((char*)htmp,address);
+                                if(bloom_check(&bloom,table[i].hash_l2,20) && rmd160_ht_lookup(table[i].hash_l2)){
+                                        Int k; k.Set32Bytes(table[i].priv); k.ModMulK1order(&lambda2);
+                                        rmd160toaddress_dst((char*)table[i].hash_l2,address);
 #pragma omp critical
-                                                {
-                                                        char *keyhex = kk.GetBase16();
-                                                        printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
-                                                        free(keyhex);
-                                                }
-                                        }
-                                        k.Set32Bytes(table[i].priv);
-                                        k.ModMulK1order(&lambda2);
-                                        p = secp->ComputePublicKey(&k);
-                                        secp->GetHash160(P2PKH,true,p,htmp);
-                                        if(bloom_check(&bloom,htmp,20) && rmd160_ht_lookup(htmp)){
-                                                Int kk; kk.Set32Bytes(table[i].priv);
-                                                kk.ModMulK1order(&lambda2);
-                                                rmd160toaddress_dst((char*)htmp,address);
-#pragma omp critical
-                                                {
-                                                        char *keyhex = kk.GetBase16();
-                                                        printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
-                                                        free(keyhex);
-                                                }
+                                        {
+                                                char *keyhex = k.GetBase16();
+                                                printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
+                                                free(keyhex);
                                         }
                                 }
                         }
                 }
         }else{
                 for(uint64_t i = 0; i < count; i++){
-                        if(bloom_check(&bloom,table[i].hash,20)){
-                                if(rmd160_ht_lookup(table[i].hash)){
-                                        Int key;
-                                        key.Set32Bytes(table[i].priv);
-                                        rmd160toaddress_dst((char*)table[i].hash,address);
-                                        char *keyhex = key.GetBase16();
+                        if(bloom_check(&bloom,table[i].hash,20) && rmd160_ht_lookup(table[i].hash)){
+                                Int key; key.Set32Bytes(table[i].priv);
+                                rmd160toaddress_dst((char*)table[i].hash,address);
+                                char *keyhex = key.GetBase16();
+                                printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
+                                free(keyhex);
+                        }
+                        if(FLAGENDOMORPHISM){
+                                if(bloom_check(&bloom,table[i].hash_l1,20) && rmd160_ht_lookup(table[i].hash_l1)){
+                                        Int k; k.Set32Bytes(table[i].priv); k.ModMulK1order(&lambda);
+                                        rmd160toaddress_dst((char*)table[i].hash_l1,address);
+                                        char *keyhex = k.GetBase16();
                                         printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
                                         free(keyhex);
                                 }
-                                if(FLAGENDOMORPHISM){
-                                        Int k;
-                                        k.Set32Bytes(table[i].priv);
-                                        k.ModMulK1order(&lambda);
-                                        Point p = secp->ComputePublicKey(&k);
-                                        secp->GetHash160(P2PKH,true,p,htmp);
-                                        if(bloom_check(&bloom,htmp,20) && rmd160_ht_lookup(htmp)){
-                                                Int kk; kk.Set32Bytes(table[i].priv);
-                                                kk.ModMulK1order(&lambda);
-                                                rmd160toaddress_dst((char*)htmp,address);
-                                                char *keyhex = kk.GetBase16();
-                                                printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
-                                                free(keyhex);
-                                        }
-                                        k.Set32Bytes(table[i].priv);
-                                        k.ModMulK1order(&lambda2);
-                                        p = secp->ComputePublicKey(&k);
-                                        secp->GetHash160(P2PKH,true,p,htmp);
-                                        if(bloom_check(&bloom,htmp,20) && rmd160_ht_lookup(htmp)){
-                                                Int kk; kk.Set32Bytes(table[i].priv);
-                                                kk.ModMulK1order(&lambda2);
-                                                rmd160toaddress_dst((char*)htmp,address);
-                                                char *keyhex = kk.GetBase16();
-                                                printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
-                                                free(keyhex);
-                                        }
+                                if(bloom_check(&bloom,table[i].hash_l2,20) && rmd160_ht_lookup(table[i].hash_l2)){
+                                        Int k; k.Set32Bytes(table[i].priv); k.ModMulK1order(&lambda2);
+                                        rmd160toaddress_dst((char*)table[i].hash_l2,address);
+                                        char *keyhex = k.GetBase16();
+                                        printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
+                                        free(keyhex);
                                 }
                         }
                 }
