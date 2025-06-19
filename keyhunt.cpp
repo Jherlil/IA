@@ -30,6 +30,9 @@ extern Secp256K1 *secp;
 
 #include <fstream>
 
+/* endomorphism precomputed point */
+Point Glambda;
+
 Point* GTable = nullptr;
 int GTableSize = 0;
 int UseGTable = 0;
@@ -118,6 +121,12 @@ Point ComputePublicKey_GTable(const Int& priv) {
         }
     }
     return result;
+}
+
+static void glv_split(const Int &k, Int &k1, Int &k2) {
+    /* Simple placeholder split: no real reduction */
+    k1.Set((Int*)&k);
+    k2.SetInt32(0);
 }
 #include "hash/ripemd160.h"
 #ifdef _OPENMP
@@ -711,14 +720,15 @@ int main(int argc, char **argv)	{
                                 FLAGDEBUG = 1;
                                 printf("[+] Flag DEBUG enabled\n");
                         break;
-			case 'e':
-				FLAGENDOMORPHISM = 1;
-				printf("[+] Endomorphism enabled\n");
-				lambda.SetBase16("5363ad4cc05c30e0a5261c028812645a122e22ea20816678df02967c1b23bd72");
-				lambda2.SetBase16("ac9c52b33fa3cf1f5ad9e3fd77ed9ba4a880b9fc8ec739c2e0cfc810b51283ce");
-				beta.SetBase16("7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee");
-				beta2.SetBase16("851695d49a83f8ef919bb86153cbcb16630fb68aed0a766a3ec693d68e6afa40");
-			break;
+                        case 'e':
+                                FLAGENDOMORPHISM = 1;
+                                printf("[+] Endomorphism enabled\n");
+                                lambda.SetBase16("5363ad4cc05c30e0a5261c028812645a122e22ea20816678df02967c1b23bd72");
+                                lambda2.SetBase16("ac9c52b33fa3cf1f5ad9e3fd77ed9ba4a880b9fc8ec739c2e0cfc810b51283ce");
+                                beta.SetBase16("7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee");
+                                beta2.SetBase16("851695d49a83f8ef919bb86153cbcb16630fb68aed0a766a3ec693d68e6afa40");
+                                Glambda = secp->ScalarMultiplication(secp->G, &lambda);
+                        break;
 			case 'f':
 				FLAGFILE = 1;
 				fileName = optarg;
@@ -6869,10 +6879,17 @@ void generate_block(Int *start,uint64_t count,struct rmd160_entry *table){
         Int key;
         key.Set(start);
         Point pub;
-        if(UseGTable)
+        if(FLAGENDOMORPHISM){
+                Int k1,k2;
+                glv_split(key,k1,k2);
+                Point p1 = secp->ScalarMultiplication(secp->G,&k1);
+                Point p2 = secp->ScalarMultiplication(Glambda,&k2);
+                pub = secp->AddDirect(p1,p2);
+        }else if(UseGTable){
                 pub = ComputePublicKey_GTable(key);
-        else
+        }else{
                 pub = secp->ComputePublicKey(&key);
+        }
 
         uint64_t i = 0;
         while(i + 8 <= count){
