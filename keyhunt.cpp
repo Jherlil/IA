@@ -6145,9 +6145,38 @@ void writekeyeth(Int *key)	{
 #if defined(_WIN64) && !defined(__CYGWIN__)
 	ReleaseMutex(write_keys);
 #else
-	pthread_mutex_unlock(&write_keys);
+        pthread_mutex_unlock(&write_keys);
 #endif
-	free(hextemp);
+        free(hextemp);
+}
+
+void writekey_rmd160_bsgs(Int *key, uint8_t *hash){
+        FILE *keys;
+        char address[40];
+        char hexrmd[41];
+        char *hextemp;
+
+        hextemp = key->GetBase16();
+        rmd160toaddress_dst((char*)hash,address);
+        tohex_dst((char*)hash,20,hexrmd);
+
+#if defined(_WIN64) && !defined(__CYGWIN__)
+        WaitForSingleObject(write_keys, INFINITE);
+#else
+        pthread_mutex_lock(&write_keys);
+#endif
+        keys = fopen("KEYFOUNDKEYFOUND.txt","a+");
+        if(keys != NULL){
+                fprintf(keys,"Private Key: %s\nAddress %s\nrmd160 %s\n",hextemp,address,hexrmd);
+                fclose(keys);
+        }
+        printf("\n[+] HIT privkey %s address %s\n",hextemp,address);
+#if defined(_WIN64) && !defined(__CYGWIN__)
+        ReleaseMutex(write_keys);
+#else
+        pthread_mutex_unlock(&write_keys);
+#endif
+        free(hextemp);
 }
 
 bool isBase58(char c) {
@@ -6825,7 +6854,6 @@ void generate_block(Int *start,uint64_t count,struct rmd160_entry *table){
 }
 
 void compare_block(struct rmd160_entry *table,uint64_t count){
-        char address[40];
         if(NTHREADS == 1){
 #pragma omp parallel for schedule(static)
                 for(uint64_t i = 0; i < count; i++){
@@ -6833,13 +6861,7 @@ void compare_block(struct rmd160_entry *table,uint64_t count){
                                 if(searchbinary(addressTable,(char*)table[i].hash,N)){
                                         Int key;
                                         key.Set32Bytes(table[i].priv);
-                                        rmd160toaddress_dst((char*)table[i].hash,address);
-#pragma omp critical
-                                        {
-                                                char *keyhex = key.GetBase16();
-                                                printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
-                                                free(keyhex);
-                                        }
+                                        writekey_rmd160_bsgs(&key, table[i].hash);
                                 }
                         }
                 }
@@ -6849,10 +6871,7 @@ void compare_block(struct rmd160_entry *table,uint64_t count){
                                 if(searchbinary(addressTable,(char*)table[i].hash,N)){
                                         Int key;
                                         key.Set32Bytes(table[i].priv);
-                                        rmd160toaddress_dst((char*)table[i].hash,address);
-                                        char *keyhex = key.GetBase16();
-                                        printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
-                                        free(keyhex);
+                                        writekey_rmd160_bsgs(&key, table[i].hash);
                                 }
                         }
                 }
