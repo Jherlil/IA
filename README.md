@@ -272,6 +272,9 @@ All the vanity address and his privatekeys will be saved in the file `VANITYKEYF
 rmd stands for RIPE Message Digest (see https://en.wikipedia.org/wiki/RIPEMD )
 
 mode rmd160 work in the same way than address, but the diference is that file need to have hash rmd160 instead of addresses.
+When using the optimized `rmd160-bsgs` mode the same bloom filter loaded here is checked before each hash comparison to speed up the search.
+You can also use `-g <bits>` to load or generate a precomputed GTable of size `2^bits` which will be stored as `gtable_<bits>.bin` for future runs. This reduces startup time when running the rmd160-bsgs search.
+AVX2 builds process eight hash160 values per iteration and you can enable the endomorphism trick with `-e` to further accelerate `rmd160-bsgs`.
 
 
 example file `tests/1to32.rmd` :
