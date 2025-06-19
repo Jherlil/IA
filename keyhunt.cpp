@@ -27,7 +27,6 @@ email: albertobsd@gmail.com
 #include "hash/sha256.h"
 
 #include <fstream>
-#include <secp256k1/SECP256K1.h>
 Point* GTable = nullptr;
 int GTableSize = 0;
 
@@ -6907,10 +6906,11 @@ void *thread_process_rmd160_bsgs(void *vargp) {
 
 		case 'g':
 			gtable_bits = atoi(optarg);
-			if (gtable_bits < 0 || gtable_bits > 6) {
-				printf("[-] Invalid GTable bits (range 0–6 allowed)\n");
+                        if (gtable_bits < 0 || gtable_bits > 60) {
+                                printf("[-] Invalid GTable bits (range 0–60 allowed)\n");
 				exit(1);
 			}
-			sprintf(gtable_filename, "gtable_%d.bin", gtable_bits + 20);
-			break;
+                        sprintf(gtable_filename, "gtable_%d.bin", gtable_bits + 20);
+                        load_gtable(gtable_filename, gtable_bits + 20);
+                        break;
 }
