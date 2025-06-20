@@ -23,13 +23,48 @@ email: albertobsd@gmail.com
 #include "secp256k1/Int.h"
 #include "secp256k1/IntGroup.h"
 #include "secp256k1/Random.h"
+extern Secp256K1 *secp;
 
 #include "hash/sha256.h"
+#include "xxhash/xxhash.h"
 
 #include <fstream>
-#include <secp256k1/SECP256K1.h>
+
+/* endomorphism precomputed point */
+Point Glambda;
+
 Point* GTable = nullptr;
 int GTableSize = 0;
+int UseGTable = 0;
+
+static void free_gtable() {
+    if (GTable) {
+        delete[] GTable;
+        GTable = nullptr;
+        GTableSize = 0;
+    }
+}
+
+static Point DecompressPoint(const uint8_t buf[33]) {
+    Point P;
+    Int x;
+    for (int i = 0; i < 32; ++i) {
+        x.SetByte(31 - i, buf[i + 1]);
+    }
+    Int t, y;
+    t.ModSquareK1(&x);
+    y.ModMulK1(&t, &x);
+    y.ModAdd(7);
+    y.ModSqrt();
+    bool even = buf[0] == 0x02;
+    if ((!y.IsEven() && even) || (y.IsEven() && !even)) {
+        y.ModNeg();
+    }
+    P.x.Set(&x);
+    P.y.Set(&y);
+    P.z.SetInt32(1);
+    return P;
+}
 
 void generate_gtable(int bits, const char* filename) {
     printf("[+] Generating GTable 2^%d...\n", bits);
@@ -38,13 +73,13 @@ void generate_gtable(int bits, const char* filename) {
         perror("[-] Cannot create GTable file");
         exit(1);
     }
-    Point G = Point::G();
+    Point G = secp->G;
     Point P = G;
     for (int64_t i = 0; i < (1LL << bits); ++i) {
-        uint8_t compressed[33];
-        P.getPublicKeyCompressed(compressed);
+        unsigned char compressed[33];
+        secp->GetPublicKeyRaw(true, P, (char*)compressed);
         fwrite(compressed, 1, 33, f);
-        P = P + G;
+        P = secp->AddDirect(P, G);
     }
     fclose(f);
     printf("[+] GTable generated and saved to %s\n", filename);
@@ -66,20 +101,61 @@ void load_gtable(const char* filename, int bits) {
     uint8_t buffer[33];
     for (int i = 0; i < GTableSize; ++i) {
         fread(buffer, 1, 33, f);
-        GTable[i].fromBytesCompressed(buffer);
+        GTable[i] = DecompressPoint(buffer);
     }
     fclose(f);
     printf("[+] GTable loaded (%d entries)\n", GTableSize);
+    UseGTable = 1;
 }
 
 Point ComputePublicKey_GTable(const Int& priv) {
     Point result;
+    result.Clear();
+    Int tmp((Int*)&priv);
     for (int i = 0; i < GTableSize; ++i) {
-        if (priv.testBit(i)) {
-            result = result + GTable[i];
+        if (tmp.GetBit(i)) {
+            if (result.isZero())
+                result = GTable[i];
+            else
+                result = secp->AddDirect(result, GTable[i]);
         }
     }
     return result;
+}
+
+static void glv_split(const Int &k, Int &k1, Int &k2) {
+    /* Split scalar using secp256k1 GLV decomposition */
+    static Int a1,b1,a2,b2;
+    static int init=0;
+    if(!init){
+        a1.SetBase16("3086d221a7d46bcde86c90e49284eb15");
+        b1.SetBase16("e4437ed6010e88286f547fa90abfe4c3");
+        a2.SetBase16("114ca50f7a8e2f3f657c1108d9d44cfd8");
+        b2.SetBase16("3086d221a7d46bcde86c90e49284eb15");
+        init=1;
+    }
+    Int c1,c2,tmp,mod;
+    tmp.Set((Int*)&k);
+    tmp.Mult(&b2);
+    tmp.Div(&secp->order,&mod);
+    c1.Set(&tmp);
+    tmp.Set((Int*)&k);
+    tmp.Mult(&b1);
+    tmp.Div(&secp->order,&mod);
+    c2.Set(&tmp);
+    Int t1,t2;
+    t1.Set(&a1); t1.Mult(&c1);
+    t2.Set(&a2); t2.Mult(&c2);
+    k1.Set((Int*)&k);
+    k1.Sub(&t1);
+    k1.Sub(&t2);
+    k1.Mod(&secp->order);
+    Int u1,u2;
+    u1.Set(&b1); u1.Mult(&c1);
+    u2.Set(&b2); u2.Mult(&c2);
+    k2.Set(&u1);
+    k2.Sub(&u2);
+    k2.Mod(&secp->order);
 }
 #include "hash/ripemd160.h"
 #ifdef _OPENMP
@@ -140,10 +216,10 @@ struct address_value	{
 
 struct rmd160_entry {
         uint8_t hash[20];
+        uint8_t hash_l1[20];
+        uint8_t hash_l2[20];
         uint8_t priv[32];
 };
-
-
 struct tothread {
 	int nt;     //Number thread
 	char *rs;   //range start
@@ -406,6 +482,24 @@ char buffer_bloom_file[1024];
 struct bsgs_xvalue *bPtable;
 struct address_value *addressTable;
 
+static const uint32_t HASH_BITS = 18;
+static std::vector<std::vector<uint32_t>> rmd160_ht(1u << HASH_BITS);
+
+static inline void rmd160_ht_add(uint32_t idx) {
+    uint64_t h = XXH3_64bits(addressTable[idx].value, 20);
+    rmd160_ht[h & ((1u << HASH_BITS) - 1)].push_back(idx);
+}
+
+static int rmd160_ht_lookup(const uint8_t *data) {
+    uint64_t h = XXH3_64bits(data, 20);
+    auto &b = rmd160_ht[h & ((1u << HASH_BITS) - 1)];
+    for (uint32_t i : b) {
+        if (memcmp(addressTable[i].value, data, 20) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 struct oldbloom oldbloom_bP;
 
 struct bloom *bloom_bP;
@@ -487,7 +581,7 @@ Int lambda,lambda2,beta,beta2;
 Secp256K1 *secp;
 
 
-int gtable_bits = -1; // -1 = desativado, 0 = 2^20, ..., 6 = 2^26
+int gtable_bits = -1; // -1 disabled, otherwise table bits (20 + gtable_bits up to 60)
 char gtable_filename[64] = {0};
 int main(int argc, char **argv)	{
 	char buffer[2048];
@@ -503,7 +597,9 @@ int main(int argc, char **argv)	{
 	char *str_seconds = NULL;
 	char *str_total = NULL;
 	char *str_pretotal = NULL;
-	char *str_divpretotal = NULL;
+        char *str_divpretotal = NULL;
+
+        atexit(free_gtable);
 	char *bf_ptr = NULL;
 	char *bPload_threads_available;
 	FILE *fd,*fd_aux1,*fd_aux2,*fd_aux3;
@@ -563,7 +659,7 @@ int main(int argc, char **argv)	{
 	
 	printf("[+] Version %s, developed by AlbertoBSD\n",version);
 
-    while ((c = getopt(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:j")) != -1) {
+    while ((c = getopt(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:g:8:z:j")) != -1) {
 		switch(c) {
 			case 'h':
 				menu();
@@ -653,14 +749,15 @@ int main(int argc, char **argv)	{
                                 FLAGDEBUG = 1;
                                 printf("[+] Flag DEBUG enabled\n");
                         break;
-			case 'e':
-				FLAGENDOMORPHISM = 1;
-				printf("[+] Endomorphism enabled\n");
-				lambda.SetBase16("5363ad4cc05c30e0a5261c028812645a122e22ea20816678df02967c1b23bd72");
-				lambda2.SetBase16("ac9c52b33fa3cf1f5ad9e3fd77ed9ba4a880b9fc8ec739c2e0cfc810b51283ce");
-				beta.SetBase16("7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee");
-				beta2.SetBase16("851695d49a83f8ef919bb86153cbcb16630fb68aed0a766a3ec693d68e6afa40");
-			break;
+                        case 'e':
+                                FLAGENDOMORPHISM = 1;
+                                printf("[+] Endomorphism enabled\n");
+                                lambda.SetBase16("5363ad4cc05c30e0a5261c028812645a122e22ea20816678df02967c1b23bd72");
+                                lambda2.SetBase16("ac9c52b33fa3cf1f5ad9e3fd77ed9ba4a880b9fc8ec739c2e0cfc810b51283ce");
+                                beta.SetBase16("7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee");
+                                beta2.SetBase16("851695d49a83f8ef919bb86153cbcb16630fb68aed0a766a3ec693d68e6afa40");
+                                Glambda = secp->ScalarMultiplication(secp->G, &lambda);
+                        break;
 			case 'f':
 				FLAGFILE = 1;
 				fileName = optarg;
@@ -859,6 +956,16 @@ int main(int argc, char **argv)	{
 					exit(EXIT_FAILURE);
 				}
 			break;
+                        case 'g':
+                                gtable_bits = atoi(optarg);
+                                if (gtable_bits < 0 || gtable_bits > 60) {
+                                        printf("[-] Invalid GTable bits (range 0-60 allowed)\n");
+                                        exit(1);
+                                }
+                                sprintf(gtable_filename, "gtable_%d.bin", gtable_bits + 20);
+                                load_gtable(gtable_filename, gtable_bits + 20);
+                                UseGTable = 1;
+                        break;
 			case 'z':
 				FLAGBLOOMMULTIPLIER= strtol(optarg,NULL,10);
 				if(FLAGBLOOMMULTIPLIER <= 0)	{
@@ -1050,10 +1157,12 @@ int main(int argc, char **argv)	{
 		
 		if(FLAGMODE != MODE_VANITY && !FLAGREADEDFILE1)	{
 			printf("[+] Sorting data ...");
-			_sort(addressTable,N);
-			printf(" done! %" PRIu64 " values were loaded and sorted\n",N);
-			writeFileIfNeeded(fileName);
-		}
+                        _sort(addressTable,N);
+                        printf(" done! %" PRIu64 " values were loaded and sorted\n",N);
+                        writeFileIfNeeded(fileName);
+                        for(uint32_t j = 0; j < N; ++j)
+                                rmd160_ht_add(j);
+                }
 	}
 	
 	if(FLAGMODE == MODE_BSGS )	{
@@ -5845,11 +5954,12 @@ void menu() {
 	printf("-c crypto   Search for specific crypto. <btc, eth> valid only w/ -m address\n");
 	printf("-C mini     Set the minikey Base only 22 character minikeys, ex: SRPqx8QiwnW4WNWnTVa2W5\n");
 	printf("-8 alpha    Set the bas58 alphabet for minikeys\n");
-	printf("-e          Enable endomorphism search (Only for address, rmd160 and vanity)\n");
-	printf("-f file     Specify file name with addresses or xpoints or uncompressed public keys\n");
-	printf("-I stride   Stride for xpoint, rmd160 and address, this option don't work with bsgs\n");
+        printf("-e          Enable endomorphism search (Only for address, rmd160 and vanity)\n");
+        printf("-f file     Specify file name with addresses or xpoints or uncompressed public keys\n");
+        printf("-I stride   Stride for xpoint, rmd160 and address, this option don't work with bsgs\n");
         printf("-k value    Use this only with bsgs mode, k value is factor for M, more speed but more RAM use wisely\n");
         printf("-j          Enable rmd160-bsgs mode (use -k N for table size)\n");
+        printf("-g bits     Load or build a GTable of 2^bits points for faster rmd160-bsgs\n");
         printf("-l look     What type of address/hash160 are you looking for <compress, uncompress, both> Only for rmd160 and address\n");
 	printf("-m mode     mode of search for cryptos. (bsgs, xpoint, rmd160, address, vanity) default: address\n");
 	printf("-M          Matrix screen, feel like a h4x0r, but performance will dropped\n");
@@ -6468,8 +6578,10 @@ bool forceReadFileAddress(char *fileName)	{
 			numberItems--;
 		}
 	}
-	N = numberItems;
-	return true;
+        N = numberItems;
+        for(uint32_t j = 0; j < N; ++j)
+                rmd160_ht_add(j);
+        return true;
 }
 
 bool forceReadFileAddressEth(char *fileName)	{
@@ -6546,8 +6658,10 @@ bool forceReadFileAddressEth(char *fileName)	{
 		}
 	}
 	
-	fclose(fileDescriptor);
-	return true;
+        fclose(fileDescriptor);
+        for(uint32_t j = 0; j < N; ++j)
+                rmd160_ht_add(j);
+        return true;
 }
 
 
@@ -6771,8 +6885,10 @@ void writeFileIfNeeded(const char *fileName)	{
 			}
 			printf(".");
 			
-			FLAGREADEDFILE1 = 1;	
-			fclose(fileDescriptor);		
+                        FLAGREADEDFILE1 = 1;
+                        for(uint32_t j = 0; j < N; ++j)
+                                rmd160_ht_add(j);
+                        fclose(fileDescriptor);
 			printf("\n");
 		}
 	}
@@ -6791,33 +6907,135 @@ void calcualteindex(int i,Int *key)	{
 void generate_block(Int *start,uint64_t count,struct rmd160_entry *table){
         Int key;
         key.Set(start);
-        Point pub = secp->ComputePublicKey(&key);
+        Point pub;
+        if(FLAGENDOMORPHISM){
+                Int k1,k2;
+                glv_split(key,k1,k2);
+                Point p1 = secp->ScalarMultiplication(secp->G,&k1);
+                Point p2 = secp->ScalarMultiplication(Glambda,&k2);
+                pub = secp->AddDirect(p1,p2);
+        }else if(UseGTable){
+                pub = ComputePublicKey_GTable(key);
+        }else{
+                pub = secp->ComputePublicKey(&key);
+        }
 
         uint64_t i = 0;
-        while(i + 4 <= count){
+        while(i + 8 <= count){
                 Point p0 = pub;
                 Point p1 = secp->AddDirect(p0,secp->G);
                 Point p2 = secp->AddDirect(p1,secp->G);
                 Point p3 = secp->AddDirect(p2,secp->G);
+                Point p4 = secp->AddDirect(p3,secp->G);
+                Point p5 = secp->AddDirect(p4,secp->G);
+                Point p6 = secp->AddDirect(p5,secp->G);
+                Point p7 = secp->AddDirect(p6,secp->G);
 
+#ifdef __AVX2__
+                secp->GetHash160_8(P2PKH,true,
+                        p0,p1,p2,p3,p4,p5,p6,p7,
+                        table[i].hash,
+                        table[i+1].hash,
+                        table[i+2].hash,
+                        table[i+3].hash,
+                        table[i+4].hash,
+                        table[i+5].hash,
+                        table[i+6].hash,
+                        table[i+7].hash);
+#else
                 secp->GetHash160(P2PKH,true,
                         p0,p1,p2,p3,
                         table[i].hash,
                         table[i+1].hash,
                         table[i+2].hash,
                         table[i+3].hash);
+                secp->GetHash160(P2PKH,true,
+                        p4,p5,p6,p7,
+                        table[i+4].hash,
+                        table[i+5].hash,
+                        table[i+6].hash,
+                        table[i+7].hash);
+#endif
+
+                if(FLAGENDOMORPHISM){
+                        Point b0=p0,b1=p1,b2=p2,b3=p3,b4=p4,b5=p5,b6=p6,b7=p7;
+                        Point c0=p0,c1=p1,c2=p2,c3=p3,c4=p4,c5=p5,c6=p6,c7=p7;
+                        b0.x.ModMulK1(&beta);  b1.x.ModMulK1(&beta);  b2.x.ModMulK1(&beta);  b3.x.ModMulK1(&beta);
+                        b4.x.ModMulK1(&beta);  b5.x.ModMulK1(&beta);  b6.x.ModMulK1(&beta);  b7.x.ModMulK1(&beta);
+                        c0.x.ModMulK1(&beta2); c1.x.ModMulK1(&beta2); c2.x.ModMulK1(&beta2); c3.x.ModMulK1(&beta2);
+                        c4.x.ModMulK1(&beta2); c5.x.ModMulK1(&beta2); c6.x.ModMulK1(&beta2); c7.x.ModMulK1(&beta2);
+#ifdef __AVX2__
+                        secp->GetHash160_8(P2PKH,true,
+                                b0,b1,b2,b3,b4,b5,b6,b7,
+                                table[i].hash_l1,
+                                table[i+1].hash_l1,
+                                table[i+2].hash_l1,
+                                table[i+3].hash_l1,
+                                table[i+4].hash_l1,
+                                table[i+5].hash_l1,
+                                table[i+6].hash_l1,
+                                table[i+7].hash_l1);
+                        secp->GetHash160_8(P2PKH,true,
+                                c0,c1,c2,c3,c4,c5,c6,c7,
+                                table[i].hash_l2,
+                                table[i+1].hash_l2,
+                                table[i+2].hash_l2,
+                                table[i+3].hash_l2,
+                                table[i+4].hash_l2,
+                                table[i+5].hash_l2,
+                                table[i+6].hash_l2,
+                                table[i+7].hash_l2);
+#else
+                        secp->GetHash160(P2PKH,true,
+                                b0,b1,b2,b3,
+                                table[i].hash_l1,
+                                table[i+1].hash_l1,
+                                table[i+2].hash_l1,
+                                table[i+3].hash_l1);
+                        secp->GetHash160(P2PKH,true,
+                                b4,b5,b6,b7,
+                                table[i+4].hash_l1,
+                                table[i+5].hash_l1,
+                                table[i+6].hash_l1,
+                                table[i+7].hash_l1);
+                        secp->GetHash160(P2PKH,true,
+                                c0,c1,c2,c3,
+                                table[i].hash_l2,
+                                table[i+1].hash_l2,
+                                table[i+2].hash_l2,
+                                table[i+3].hash_l2);
+                        secp->GetHash160(P2PKH,true,
+                                c4,c5,c6,c7,
+                                table[i+4].hash_l2,
+                                table[i+5].hash_l2,
+                                table[i+6].hash_l2,
+                                table[i+7].hash_l2);
+#endif
+                }
 
                 key.Get32Bytes(table[i].priv); key.AddOne();
                 key.Get32Bytes(table[i+1].priv); key.AddOne();
                 key.Get32Bytes(table[i+2].priv); key.AddOne();
                 key.Get32Bytes(table[i+3].priv); key.AddOne();
+                key.Get32Bytes(table[i+4].priv); key.AddOne();
+                key.Get32Bytes(table[i+5].priv); key.AddOne();
+                key.Get32Bytes(table[i+6].priv); key.AddOne();
+                key.Get32Bytes(table[i+7].priv); key.AddOne();
 
-                pub = secp->AddDirect(p3,secp->G);
-                i += 4;
+                pub = secp->AddDirect(p7,secp->G);
+                i += 8;
         }
 
         for(; i < count; i++){
                 secp->GetHash160(P2PKH,true,pub,table[i].hash);
+                if(FLAGENDOMORPHISM){
+                        Point b = pub;
+                        b.x.ModMulK1(&beta);
+                        secp->GetHash160(P2PKH,true,b,table[i].hash_l1);
+                        b.x.Set(&pub.x);
+                        b.x.ModMulK1(&beta2);
+                        secp->GetHash160(P2PKH,true,b,table[i].hash_l2);
+                }
                 key.Get32Bytes(table[i].priv);
                 key.AddOne();
                 pub = secp->AddDirect(pub,secp->G);
@@ -6829,14 +7047,33 @@ void compare_block(struct rmd160_entry *table,uint64_t count){
         if(NTHREADS == 1){
 #pragma omp parallel for schedule(static)
                 for(uint64_t i = 0; i < count; i++){
-                        if(bloom_check(&bloom,table[i].hash,20)){
-                                if(searchbinary(addressTable,(char*)table[i].hash,N)){
-                                        Int key;
-                                        key.Set32Bytes(table[i].priv);
-                                        rmd160toaddress_dst((char*)table[i].hash,address);
+                        if(bloom_check(&bloom,table[i].hash,20) && rmd160_ht_lookup(table[i].hash)){
+                                Int key; key.Set32Bytes(table[i].priv);
+                                rmd160toaddress_dst((char*)table[i].hash,address);
+#pragma omp critical
+                                {
+                                        char *keyhex = key.GetBase16();
+                                        printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
+                                        free(keyhex);
+                                }
+                        }
+                        if(FLAGENDOMORPHISM){
+                                if(bloom_check(&bloom,table[i].hash_l1,20) && rmd160_ht_lookup(table[i].hash_l1)){
+                                        Int k; k.Set32Bytes(table[i].priv); k.ModMulK1order(&lambda);
+                                        rmd160toaddress_dst((char*)table[i].hash_l1,address);
 #pragma omp critical
                                         {
-                                                char *keyhex = key.GetBase16();
+                                                char *keyhex = k.GetBase16();
+                                                printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
+                                                free(keyhex);
+                                        }
+                                }
+                                if(bloom_check(&bloom,table[i].hash_l2,20) && rmd160_ht_lookup(table[i].hash_l2)){
+                                        Int k; k.Set32Bytes(table[i].priv); k.ModMulK1order(&lambda2);
+                                        rmd160toaddress_dst((char*)table[i].hash_l2,address);
+#pragma omp critical
+                                        {
+                                                char *keyhex = k.GetBase16();
                                                 printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
                                                 free(keyhex);
                                         }
@@ -6845,12 +7082,25 @@ void compare_block(struct rmd160_entry *table,uint64_t count){
                 }
         }else{
                 for(uint64_t i = 0; i < count; i++){
-                        if(bloom_check(&bloom,table[i].hash,20)){
-                                if(searchbinary(addressTable,(char*)table[i].hash,N)){
-                                        Int key;
-                                        key.Set32Bytes(table[i].priv);
-                                        rmd160toaddress_dst((char*)table[i].hash,address);
-                                        char *keyhex = key.GetBase16();
+                        if(bloom_check(&bloom,table[i].hash,20) && rmd160_ht_lookup(table[i].hash)){
+                                Int key; key.Set32Bytes(table[i].priv);
+                                rmd160toaddress_dst((char*)table[i].hash,address);
+                                char *keyhex = key.GetBase16();
+                                printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
+                                free(keyhex);
+                        }
+                        if(FLAGENDOMORPHISM){
+                                if(bloom_check(&bloom,table[i].hash_l1,20) && rmd160_ht_lookup(table[i].hash_l1)){
+                                        Int k; k.Set32Bytes(table[i].priv); k.ModMulK1order(&lambda);
+                                        rmd160toaddress_dst((char*)table[i].hash_l1,address);
+                                        char *keyhex = k.GetBase16();
+                                        printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
+                                        free(keyhex);
+                                }
+                                if(bloom_check(&bloom,table[i].hash_l2,20) && rmd160_ht_lookup(table[i].hash_l2)){
+                                        Int k; k.Set32Bytes(table[i].priv); k.ModMulK1order(&lambda2);
+                                        rmd160toaddress_dst((char*)table[i].hash_l2,address);
+                                        char *keyhex = k.GetBase16();
                                         printf("\n[+] HIT privkey %s address %s\n",keyhex,address);
                                         free(keyhex);
                                 }
@@ -6904,13 +7154,4 @@ void *thread_process_rmd160_bsgs(void *vargp) {
         free(table);
         ends[thread_number] = 1;
         return NULL;
-
-		case 'g':
-			gtable_bits = atoi(optarg);
-			if (gtable_bits < 0 || gtable_bits > 6) {
-				printf("[-] Invalid GTable bits (range 0–6 allowed)\n");
-				exit(1);
-			}
-			sprintf(gtable_filename, "gtable_%d.bin", gtable_bits + 20);
-			break;
 }
