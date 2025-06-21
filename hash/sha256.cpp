@@ -11,7 +11,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
  * General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
+  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
@@ -524,4 +524,10 @@ bool sha256_file(const char* file_name, uint8_t* checksum) {
 	sha.Finalize(checksum);
 	fclose(file);
 	return true;
+}
+
+void sha256_batch_33(const uint8_t *inputs, size_t n, uint8_t *out) {
+    for(size_t i=0; i<n; ++i) {
+        sha256_33((unsigned char *)(inputs + i*33), out + i*32);
+    }
 }
