@@ -45,6 +45,19 @@ void ripemd160sse_32(uint8_t *i0, uint8_t *i1, uint8_t *i2, uint8_t *i3,
   uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3);
 void ripemd160sse_test();
 std::string ripemd160_hex(unsigned char *digest);
+#ifdef __cplusplus
+extern "C" {
+#endif
+void ripemd160_batch_32(const uint8_t *inputs, size_t n, uint8_t *out);
+#ifdef __cplusplus
+}
+#endif
+#ifdef __AVX2__
+void ripemd160_avx2_8(uint8_t *i0, uint8_t *i1, uint8_t *i2, uint8_t *i3,
+                       uint8_t *i4, uint8_t *i5, uint8_t *i6, uint8_t *i7,
+                       uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3,
+                       uint8_t *d4, uint8_t *d5, uint8_t *d6, uint8_t *d7);
+#endif
 
 static inline bool ripemd160_comp_hash(uint8_t *h0, uint8_t *h1) {
   uint32_t *h0i = (uint32_t *)h0;
