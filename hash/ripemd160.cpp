@@ -319,3 +319,9 @@ std::string ripemd160_hex(unsigned char *digest) {
   return std::string(buf);
 
 }
+
+void ripemd160_batch_32(const uint8_t *inputs, size_t n, uint8_t *out) {
+  for(size_t i=0; i<n; ++i) {
+    ripemd160_32((unsigned char *)(inputs + i*32), out + i*20);
+  }
+}
